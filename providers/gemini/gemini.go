@@ -231,6 +231,11 @@ func buildRequestBody(prompt []*llmhub.Message, cfg llmhub.Config) ([]byte, erro
 			req.GenerationConfig.MaxOutputTokens = cfg.MaxTokens
 		}
 	}
+	if cfg.EnableWebSearch {
+		req.Tools = []geminiTool{
+			{GoogleSearch: &googleSearchTool{}},
+		}
+	}
 	return json.Marshal(req)
 }
 
@@ -359,7 +364,14 @@ type geminiRequest struct {
 	Contents          []geminiContent   `json:"contents"`
 	SystemInstruction *geminiContent    `json:"system_instruction,omitempty"`
 	GenerationConfig  *generationConfig `json:"generation_config,omitempty"`
+	Tools             []geminiTool      `json:"tools,omitempty"`
 }
+
+type geminiTool struct {
+	GoogleSearch *googleSearchTool `json:"google_search,omitempty"`
+}
+
+type googleSearchTool struct{}
 
 type geminiContent struct {
 	Role  string       `json:"role,omitempty"`

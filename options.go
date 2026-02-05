@@ -4,13 +4,14 @@ import "net/http"
 
 // Config captures all tunable request options shared across providers.
 type Config struct {
-	Model       string
-	Temperature float64
-	MaxTokens   int
-	APIKey      string
-	BaseURL     string
-	HTTPClient  *http.Client
-	Headers     map[string]string
+	Model             string
+	Temperature       float64
+	MaxTokens         int
+	APIKey            string
+	BaseURL           string
+	HTTPClient        *http.Client
+	Headers           map[string]string
+	EnableWebSearch   bool // Enables web search/grounding (Gemini: google_search, Perplexity: always on)
 }
 
 // Option mutates a Config in a functional-options friendly way.
@@ -101,6 +102,15 @@ func WithHeader(key, value string) Option {
 			c.Headers = map[string]string{}
 		}
 		c.Headers[key] = value
+	}
+}
+
+// WithWebSearch enables web search/grounding capabilities.
+// For Gemini, this enables google_search tool.
+// For Perplexity models, web search is always enabled.
+func WithWebSearch(enabled bool) Option {
+	return func(c *Config) {
+		c.EnableWebSearch = enabled
 	}
 }
 

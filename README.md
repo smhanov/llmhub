@@ -124,6 +124,32 @@ Each provider reads the shared functional options:
 - `WithAPIKey` – supply SaaS credentials (`openai`, `anthropic`, `gemini`).
 - `WithBaseURL` – point to proxies/self-hosted gateways.
 - `WithModel`, `WithTemperature`, `WithMaxTokens` – customize LLM behavior per call.
+- `WithWebSearch` – enable web search/grounding (Gemini: `google_search` tool).
+
+## Web Search / Grounding
+
+Some providers support web search to ground responses in real-time information:
+
+```go
+client, _ := llmhub.New("gemini", apiKey,
+    llmhub.WithModel("gemini-2.5-flash"),
+    llmhub.WithWebSearch(true),
+)
+
+prompt := []*llmhub.Message{
+    llmhub.NewUserMessage(llmhub.Text("What are the latest news about Apple Inc?")),
+}
+
+resp, _ := client.Generate(ctx, prompt)
+fmt.Println(resp.Text())
+```
+
+| Provider  | Web Search Support |
+|-----------|-------------------|
+| Gemini    | ✅ Uses `google_search` tool |
+| OpenAI    | ❌ Not supported |
+| Anthropic | ❌ Not supported |
+| Ollama    | ❌ Not supported |
 
 Need multi-provider routing? Instantiate one `llmhub.Client` per provider and switch at runtime:
 
