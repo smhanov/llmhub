@@ -77,11 +77,12 @@ func (i *ImageContent) Type() string { return "image" }
 // Image is a helper constructor for an image part.
 func Image(url string) *ImageContent { return &ImageContent{URL: url} }
 
-// UsageMetadata captures token consumption information reported by providers.
+// UsageMetadata captures token consumption and cost information reported by providers.
 type UsageMetadata struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	Cost             float64 // Estimated cost in US dollars based on configured per-million-token rates.
 }
 
 // Response contains the normalized result returned from a provider.

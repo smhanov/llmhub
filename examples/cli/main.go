@@ -36,6 +36,8 @@ func main() {
 	temperature := flag.Float64("temperature", 0.7, "Sampling temperature")
 	maxTokens := flag.Int("max-tokens", 0, "Maximum tokens to generate")
 	images := flag.String("images", "", "Comma-separated list of image file paths or URLs")
+	inputCost := flag.Float64("input-cost", 0, "Cost per 1M input tokens in USD")
+	outputCost := flag.Float64("output-cost", 0, "Cost per 1M output tokens in USD")
 
 	flag.Parse()
 
@@ -87,6 +89,9 @@ func main() {
 	}
 	if *maxTokens > 0 {
 		opts = append(opts, llmhub.WithMaxTokens(*maxTokens))
+	}
+	if *inputCost > 0 || *outputCost > 0 {
+		opts = append(opts, llmhub.WithCost(*inputCost, *outputCost))
 	}
 
 	client, err := llmhub.New(*provider, key, opts...)
@@ -157,6 +162,9 @@ func main() {
 		fmt.Println("---")
 		fmt.Printf("Tokens: prompt=%d, completion=%d, total=%d\n",
 			resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+		if resp.Usage.Cost > 0 {
+			fmt.Printf("Cost: $%.6f\n", resp.Usage.Cost)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package llmhub
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,89 @@ func TestClientGenerate(t *testing.T) {
 	}
 	if resp.Text() != "ok" || !captured {
 		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
+func TestClientGenerateCostCalculation(t *testing.T) {
+	stub := &testProvider{
+		generateFn: func(ctx context.Context, prompt []*Message, opts ...Option) (*Response, error) {
+			return &Response{
+				ID:      "cost-test",
+				Content: []ContentPart{Text("ok")},
+				Usage: UsageMetadata{
+					PromptTokens:     1000,
+					CompletionTokens: 500,
+					TotalTokens:      1500,
+				},
+			}, nil
+		},
+	}
+	client := Wrap(stub, WithModel("unit-test"), WithCost(2.50, 10.00))
+	resp, err := client.Generate(context.Background(), []*Message{NewUserMessage(Text("hi"))})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	// Expected: (1000 * 2.50 / 1_000_000) + (500 * 10.00 / 1_000_000)
+	//         = 0.0025 + 0.005 = 0.0075
+	expected := 0.0075
+	if math.Abs(resp.Usage.Cost-expected) > 1e-9 {
+		t.Fatalf("expected cost %f, got %f", expected, resp.Usage.Cost)
+	}
+}
+
+func TestClientGenerateCostZeroWhenNotConfigured(t *testing.T) {
+	stub := &testProvider{
+		generateFn: func(ctx context.Context, prompt []*Message, opts ...Option) (*Response, error) {
+			return &Response{
+				ID:      "no-cost",
+				Content: []ContentPart{Text("ok")},
+				Usage: UsageMetadata{
+					PromptTokens:     1000,
+					CompletionTokens: 500,
+					TotalTokens:      1500,
+				},
+			}, nil
+		},
+	}
+	client := Wrap(stub)
+	resp, err := client.Generate(context.Background(), []*Message{NewUserMessage(Text("hi"))})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if resp.Usage.Cost != 0 {
+		t.Fatalf("expected zero cost when not configured, got %f", resp.Usage.Cost)
+	}
+}
+
+func TestClientGenerateCostPerRequestOverride(t *testing.T) {
+	stub := &testProvider{
+		generateFn: func(ctx context.Context, prompt []*Message, opts ...Option) (*Response, error) {
+			return &Response{
+				ID:      "override",
+				Content: []ContentPart{Text("ok")},
+				Usage: UsageMetadata{
+					PromptTokens:     2000,
+					CompletionTokens: 1000,
+					TotalTokens:      3000,
+				},
+			}, nil
+		},
+	}
+	// Client defaults: $5.00/$15.00 per 1M tokens
+	client := Wrap(stub, WithCost(5.00, 15.00))
+	// Per-request override: $1.00/$3.00 per 1M tokens
+	resp, err := client.Generate(context.Background(),
+		[]*Message{NewUserMessage(Text("hi"))},
+		WithCost(1.00, 3.00),
+	)
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	// Expected: (2000 * 1.00 / 1_000_000) + (1000 * 3.00 / 1_000_000)
+	//         = 0.002 + 0.003 = 0.005
+	expected := 0.005
+	if math.Abs(resp.Usage.Cost-expected) > 1e-9 {
+		t.Fatalf("expected cost %f, got %f", expected, resp.Usage.Cost)
 	}
 }
 

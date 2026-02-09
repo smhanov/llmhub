@@ -31,7 +31,19 @@ func (c *Client) Generate(ctx context.Context, prompt []*Message, opts ...Option
 	if err != nil {
 		return nil, &Error{Provider: c.provider.Name(), Op: "Generate", Err: err}
 	}
+	computeCost(resp, merged)
 	return resp, nil
+}
+
+// computeCost populates Response.Usage.Cost based on token counts and configured rates.
+func computeCost(resp *Response, opts []Option) {
+	if resp == nil {
+		return
+	}
+	cfg := NewConfig(opts...)
+	inputCost := float64(resp.Usage.PromptTokens) * cfg.InputCostPerMillionTokens / 1_000_000
+	outputCost := float64(resp.Usage.CompletionTokens) * cfg.OutputCostPerMillionTokens / 1_000_000
+	resp.Usage.Cost = inputCost + outputCost
 }
 
 // Stream initiates a streaming interaction and returns a read-only channel of chunks.

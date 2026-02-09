@@ -125,6 +125,43 @@ Each provider reads the shared functional options:
 - `WithBaseURL` – point to proxies/self-hosted gateways.
 - `WithModel`, `WithTemperature`, `WithMaxTokens` – customize LLM behavior per call.
 - `WithWebSearch` – enable web search/grounding (Gemini: `google_search` tool).
+- `WithCost` – set per-million-token pricing for cost accounting.
+
+## Cost Accounting
+
+llmhub can track the estimated cost of each request based on token usage and
+configured per-million-token rates. Costs are expressed in US dollars per 1
+million tokens, matching standard LLM provider pricing.
+
+```go
+client, _ := llmhub.New("openai", apiKey,
+    llmhub.WithModel("gpt-4o"),
+    llmhub.WithCost(2.50, 10.00), // $2.50 per 1M input, $10.00 per 1M output tokens
+)
+
+resp, _ := client.Generate(ctx, prompt)
+fmt.Printf("Tokens: %d in, %d out\n",
+    resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+fmt.Printf("Cost: $%.6f\n", resp.Usage.Cost)
+```
+
+Cost is computed automatically after each `Generate` call:
+
+$$
+\text{Cost} = \frac{\text{PromptTokens} \times \text{InputRate}}{1{,}000{,}000}
++ \frac{\text{CompletionTokens} \times \text{OutputRate}}{1{,}000{,}000}
+$$
+
+If no cost rates are configured, `Usage.Cost` will be zero.
+
+You can also override cost rates on a per-request basis:
+
+```go
+// Use cheaper rates for a specific call
+resp, _ := client.Generate(ctx, prompt,
+    llmhub.WithCost(0.15, 0.60),
+)
+```
 
 ## Web Search / Grounding
 
@@ -195,6 +232,8 @@ go run ./examples/cli [options]
 | `-stream` | Enable streaming mode |
 | `-temperature` | Sampling temperature (default: 0.7) |
 | `-max-tokens` | Maximum tokens to generate |
+| `-input-cost` | Cost per 1M input tokens in USD (for cost accounting) |
+| `-output-cost` | Cost per 1M output tokens in USD (for cost accounting) |
 
 ### Examples
 
@@ -240,6 +279,16 @@ go run ./examples/cli \
 ```bash
 export OPENAI_API_KEY=sk-...
 go run ./examples/cli -provider openai -model gpt-4o -prompt "Hello!"
+```
+
+**With cost accounting:**
+```bash
+go run ./examples/cli \
+  -provider openai \
+  -model gpt-4o \
+  -input-cost 2.50 \
+  -output-cost 10.00 \
+  -prompt "Explain Go interfaces."
 ```
 
 ## Contributing

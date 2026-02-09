@@ -12,6 +12,10 @@ type Config struct {
 	HTTPClient        *http.Client
 	Headers           map[string]string
 	EnableWebSearch   bool // Enables web search/grounding (Gemini: google_search, Perplexity: always on)
+
+	// Cost accounting: prices expressed per 1 million tokens.
+	InputCostPerMillionTokens  float64
+	OutputCostPerMillionTokens float64
 }
 
 // Option mutates a Config in a functional-options friendly way.
@@ -111,6 +115,15 @@ func WithHeader(key, value string) Option {
 func WithWebSearch(enabled bool) Option {
 	return func(c *Config) {
 		c.EnableWebSearch = enabled
+	}
+}
+
+// WithCost sets the cost per 1 million tokens (input and output) in US dollars.
+// This is used to compute the estimated cost of each request based on token usage.
+func WithCost(inputCostPerMillionTokens, outputCostPerMillionTokens float64) Option {
+	return func(c *Config) {
+		c.InputCostPerMillionTokens = inputCostPerMillionTokens
+		c.OutputCostPerMillionTokens = outputCostPerMillionTokens
 	}
 }
 
