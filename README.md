@@ -101,12 +101,33 @@ At runtime, consumers simply call `llmhub.New("my-llm", "token")`.
 
 ## Built-in Providers
 
-| Provider  | Status        | Notes |
-|-----------|---------------|-------|
-| OpenAI    | ✅ Production | Chat Completions, multi-modal prompts, SSE streaming. |
-| Anthropic | ✅ Production | Claude 3 Messages API with streaming deltas. |
+| Provider  | Status        | Notes                                                    |
+| --------- | ------------- | -------------------------------------------------------- |
+| OpenAI    | ✅ Production | Chat Completions, multi-modal prompts, SSE streaming.    |
+| Anthropic | ✅ Production | Claude 3 Messages API with streaming deltas.             |
 | Gemini    | ✅ Production | Gemini 1.5 multi-modal text+vision APIs, streaming JSON. |
-| Ollama    | ✅ Production | Local inference via `/api/chat`, streaming friendly. |
+| Ollama    | ✅ Production | Local inference via `/api/chat`, streaming friendly.     |
+
+### OpenAI Provider Details
+
+**Automatic `/v1` suffix:** When a custom base URL is provided (via `WithBaseURL`), the
+OpenAI provider ensures the URL ends with `/v1`. If it doesn't, `/v1` is appended
+automatically. This means both `https://api.openai.com` and
+`https://api.openai.com/v1` are accepted and behave identically.
+
+**`"default"` model:** When the model is set to `"default"` (case-insensitive), the
+provider queries the `/v1/models` endpoint at initialization and automatically
+selects the first available model. This is especially useful for self-hosted
+OpenAI-compatible servers (e.g. Ollama, vLLM, LocalAI) where you may not know
+the model name in advance:
+
+```go
+client, err := llmhub.New("openai", "key",
+    llmhub.WithBaseURL("http://localhost:11434"),
+    llmhub.WithModel("default"),
+)
+// The provider will query http://localhost:11434/v1/models and use the first model.
+```
 
 To reduce binary size, providers self-register when imported, enabling tree-shaking when unused.
 
@@ -181,12 +202,12 @@ resp, _ := client.Generate(ctx, prompt)
 fmt.Println(resp.Text())
 ```
 
-| Provider  | Web Search Support |
-|-----------|-------------------|
+| Provider  | Web Search Support           |
+| --------- | ---------------------------- |
 | Gemini    | ✅ Uses `google_search` tool |
-| OpenAI    | ❌ Not supported |
-| Anthropic | ❌ Not supported |
-| Ollama    | ❌ Not supported |
+| OpenAI    | ❌ Not supported             |
+| Anthropic | ❌ Not supported             |
+| Ollama    | ❌ Not supported             |
 
 Need multi-provider routing? Instantiate one `llmhub.Client` per provider and switch at runtime:
 
@@ -220,24 +241,25 @@ go run ./examples/cli [options]
 
 ### Options
 
-| Flag | Description |
-|------|-------------|
-| `-provider` | Provider name: `openai`, `anthropic`, `gemini`, `ollama` (required) |
-| `-model` | Model identifier (e.g., `gpt-4o`, `claude-3-haiku-20240307`, `gemini-2.5-flash`) |
-| `-api-key` | API key (or use env vars `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) |
-| `-base-url` | Override provider base URL (useful for Ollama or proxies) |
-| `-prompt` | Text prompt to send |
-| `-prompt-file` | File containing the prompt text |
-| `-images` | Comma-separated list of image file paths or URLs |
-| `-stream` | Enable streaming mode |
-| `-temperature` | Sampling temperature (default: 0.7) |
-| `-max-tokens` | Maximum tokens to generate |
-| `-input-cost` | Cost per 1M input tokens in USD (for cost accounting) |
-| `-output-cost` | Cost per 1M output tokens in USD (for cost accounting) |
+| Flag           | Description                                                                       |
+| -------------- | --------------------------------------------------------------------------------- |
+| `-provider`    | Provider name: `openai`, `anthropic`, `gemini`, `ollama` (required)               |
+| `-model`       | Model identifier (e.g., `gpt-4o`, `claude-3-haiku-20240307`, `gemini-2.5-flash`)  |
+| `-api-key`     | API key (or use env vars `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) |
+| `-base-url`    | Override provider base URL (useful for Ollama or proxies)                         |
+| `-prompt`      | Text prompt to send                                                               |
+| `-prompt-file` | File containing the prompt text                                                   |
+| `-images`      | Comma-separated list of image file paths or URLs                                  |
+| `-stream`      | Enable streaming mode                                                             |
+| `-temperature` | Sampling temperature (default: 0.7)                                               |
+| `-max-tokens`  | Maximum tokens to generate                                                        |
+| `-input-cost`  | Cost per 1M input tokens in USD (for cost accounting)                             |
+| `-output-cost` | Cost per 1M output tokens in USD (for cost accounting)                            |
 
 ### Examples
 
 **Text generation with Ollama (self-hosted):**
+
 ```bash
 go run ./examples/cli \
   -provider ollama \
@@ -247,6 +269,7 @@ go run ./examples/cli \
 ```
 
 **Text generation with Gemini:**
+
 ```bash
 go run ./examples/cli \
   -provider gemini \
@@ -256,6 +279,7 @@ go run ./examples/cli \
 ```
 
 **Vision/image input with Gemini:**
+
 ```bash
 go run ./examples/cli \
   -provider gemini \
@@ -266,6 +290,7 @@ go run ./examples/cli \
 ```
 
 **Streaming mode with OpenAI:**
+
 ```bash
 go run ./examples/cli \
   -provider openai \
@@ -276,12 +301,14 @@ go run ./examples/cli \
 ```
 
 **Using environment variables:**
+
 ```bash
 export OPENAI_API_KEY=sk-...
 go run ./examples/cli -provider openai -model gpt-4o -prompt "Hello!"
 ```
 
 **With cost accounting:**
+
 ```bash
 go run ./examples/cli \
   -provider openai \

@@ -4,14 +4,14 @@ import "net/http"
 
 // Config captures all tunable request options shared across providers.
 type Config struct {
-	Model             string
-	Temperature       float64
-	MaxTokens         int
-	APIKey            string
-	BaseURL           string
-	HTTPClient        *http.Client
-	Headers           map[string]string
-	EnableWebSearch   bool // Enables web search/grounding (Gemini: google_search, Perplexity: always on)
+	Model           string
+	Temperature     float64
+	MaxTokens       int
+	APIKey          string
+	BaseURL         string
+	HTTPClient      *http.Client
+	Headers         map[string]string
+	EnableWebSearch bool // Enables web search/grounding (Gemini: google_search, Perplexity: always on)
 
 	// Cost accounting: prices expressed per 1 million tokens.
 	InputCostPerMillionTokens  float64

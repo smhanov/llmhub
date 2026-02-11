@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	providerName     = "openai"
-	defaultBaseURL   = "https://api.openai.com/v1"
-	chatEndpointPath = "/chat/completions"
+	providerName      = "openai"
+	defaultBaseURL    = "https://api.openai.com/v1"
+	chatEndpointPath  = "/chat/completions"
+	modelsEndpointPath = "/models"
 )
 
 // Client implements the llmhub.Provider interface for OpenAI's Chat Completions API.
@@ -32,6 +33,13 @@ func init() {
 }
 
 // New instantiates a new OpenAI provider.
+//
+// If the configured base URL does not end with "/v1", the suffix is appended
+// automatically so that callers can pass either "https://api.openai.com" or
+// "https://api.openai.com/v1".
+//
+// When the model is set to "default" (case-insensitive), the provider queries
+// the /v1/models endpoint and selects the first available model.
 func New(apiKey string, opts ...llmhub.Option) (llmhub.Provider, error) {
 	cfg := llmhub.NewConfig(opts...)
 	if cfg.APIKey == "" {
@@ -43,11 +51,19 @@ func New(apiKey string, opts ...llmhub.Option) (llmhub.Provider, error) {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = defaultBaseURL
 	}
+	cfg.BaseURL = ensureV1Suffix(cfg.BaseURL)
 	if cfg.Model == "" {
 		cfg.Model = "gpt-4o-mini"
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 2 * time.Minute}
+	}
+	if strings.EqualFold(cfg.Model, "default") {
+		model, err := fetchFirstModel(context.Background(), cfg)
+		if err != nil {
+			return nil, fmt.Errorf("openai: resolve default model: %w", err)
+		}
+		cfg.Model = model
 	}
 	return &Client{baseCfg: cfg}, nil
 }
@@ -185,6 +201,13 @@ func (c *Client) mergeConfig(opts ...llmhub.Option) llmhub.Config {
 	}
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = c.baseCfg.BaseURL
+	}
+	// Re-apply normalisations that New() performed, because the caller's
+	// original options (stored in llmhub.Client.defaultOpts) are re-applied
+	// on every call and may overwrite the corrected values.
+	cfg.BaseURL = ensureV1Suffix(cfg.BaseURL)
+	if strings.EqualFold(cfg.Model, "default") {
+		cfg.Model = c.baseCfg.Model
 	}
 	return cfg
 }
@@ -335,4 +358,47 @@ type streamResponse struct {
 			Content []messageContent `json:"content"`
 		} `json:"delta"`
 	} `json:"choices"`
+}
+
+type modelsResponse struct {
+	Data []struct {
+		ID string `json:"id"`
+	} `json:"data"`
+}
+
+// ensureV1Suffix appends "/v1" to the base URL when it is not already present.
+func ensureV1Suffix(base string) string {
+	trimmed := strings.TrimRight(base, "/")
+	if strings.HasSuffix(trimmed, "/v1") {
+		return trimmed
+	}
+	return trimmed + "/v1"
+}
+
+// fetchFirstModel queries the /models endpoint and returns the ID of the first
+// model in the response.
+func fetchFirstModel(ctx context.Context, cfg llmhub.Config) (string, error) {
+	url := cfg.BaseURL + modelsEndpointPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+	resp, err := cfg.HTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var models modelsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&models); err != nil {
+		return "", err
+	}
+	if len(models.Data) == 0 {
+		return "", errors.New("no models available")
+	}
+	return models.Data[0].ID, nil
 }
