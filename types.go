@@ -65,6 +65,17 @@ func (t *TextContent) Type() string { return "text" }
 // Text is a helper constructor for a text part.
 func Text(s string) *TextContent { return &TextContent{Text: s} }
 
+// ReasoningContent represents model-internal reasoning or thinking text when providers expose it.
+type ReasoningContent struct {
+	Text string
+}
+
+// Type identifies the piece as reasoning.
+func (r *ReasoningContent) Type() string { return "reasoning" }
+
+// Reasoning is a helper constructor for a reasoning part.
+func Reasoning(s string) *ReasoningContent { return &ReasoningContent{Text: s} }
+
 // ImageContent represents a reference to an image by URL or base64 payload.
 type ImageContent struct {
 	URL    string
@@ -107,9 +118,24 @@ func (r *Response) Text() string {
 	return b.String()
 }
 
+// ReasoningText concatenates reasoning segments exposed by providers.
+func (r *Response) ReasoningText() string {
+	if r == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, part := range r.Content {
+		if rc, ok := part.(*ReasoningContent); ok {
+			b.WriteString(rc.Text)
+		}
+	}
+	return b.String()
+}
+
 // StreamChunk represents a partial streaming response.
 type StreamChunk struct {
-	Delta string
-	Done  bool
-	Err   error
+	Delta          string
+	ReasoningDelta string
+	Done           bool
+	Err            error
 }

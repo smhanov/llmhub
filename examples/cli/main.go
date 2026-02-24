@@ -38,6 +38,7 @@ func main() {
 	images := flag.String("images", "", "Comma-separated list of image file paths or URLs")
 	inputCost := flag.Float64("input-cost", 0, "Cost per 1M input tokens in USD")
 	outputCost := flag.Float64("output-cost", 0, "Cost per 1M output tokens in USD")
+	timeout := flag.Duration("timeout", 5*time.Minute, "Request timeout (e.g. 30s, 2m, 10m)")
 
 	flag.Parse()
 
@@ -93,6 +94,7 @@ func main() {
 	if *inputCost > 0 || *outputCost > 0 {
 		opts = append(opts, llmhub.WithCost(*inputCost, *outputCost))
 	}
+	opts = append(opts, llmhub.WithHTTPClient(&http.Client{Timeout: *timeout}))
 
 	client, err := llmhub.New(*provider, key, opts...)
 	if err != nil {
@@ -124,7 +126,7 @@ func main() {
 		llmhub.NewUserMessage(parts...),
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
 	fmt.Printf("Provider: %s\n", *provider)
@@ -146,6 +148,9 @@ func main() {
 				fmt.Fprintf(os.Stderr, "\nStream error: %v\n", chunk.Err)
 				os.Exit(1)
 			}
+			if chunk.ReasoningDelta != "" {
+				fmt.Fprintf(os.Stderr, "[reasoning] %s", chunk.ReasoningDelta)
+			}
 			fmt.Print(chunk.Delta)
 			if chunk.Done {
 				break
@@ -159,6 +164,11 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(resp.Text())
+		if reasoning := resp.ReasoningText(); reasoning != "" {
+			fmt.Println("---")
+			fmt.Println("Reasoning:")
+			fmt.Println(reasoning)
+		}
 		fmt.Println("---")
 		fmt.Printf("Tokens: prompt=%d, completion=%d, total=%d\n",
 			resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)

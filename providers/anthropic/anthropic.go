@@ -145,14 +145,15 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 					return
 				}
 				text := strings.TrimSpace(delta.Delta.Text)
-				if text == "" {
+				reasoning := strings.TrimSpace(delta.Delta.Thinking)
+				if text == "" && reasoning == "" {
 					continue
 				}
 				select {
 				case <-ctx.Done():
 					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
 					return
-				case ch <- llmhub.StreamChunk{Delta: text}:
+				case ch <- llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning}:
 				}
 			case "message_stop":
 				ch <- llmhub.StreamChunk{Done: true}
@@ -331,6 +332,8 @@ func convertResponseContent(blocks []anthropicContent) ([]llmhub.ContentPart, er
 		switch block.Type {
 		case "text":
 			parts = append(parts, llmhub.Text(block.Text))
+		case "thinking", "reasoning":
+			parts = append(parts, llmhub.Reasoning(firstNonEmpty(block.Thinking, block.Text)))
 		case "image":
 			if block.Source != nil {
 				url := block.Source.URL
@@ -342,6 +345,15 @@ func convertResponseContent(blocks []anthropicContent) ([]llmhub.ContentPart, er
 		}
 	}
 	return parts, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type anthropicRequest struct {
@@ -359,9 +371,10 @@ type anthropicMessage struct {
 }
 
 type anthropicContent struct {
-	Type   string       `json:"type"`
-	Text   string       `json:"text,omitempty"`
-	Source *imageSource `json:"source,omitempty"`
+	Type     string       `json:"type"`
+	Text     string       `json:"text,omitempty"`
+	Thinking string       `json:"thinking,omitempty"`
+	Source   *imageSource `json:"source,omitempty"`
 }
 
 type imageSource struct {
@@ -384,7 +397,8 @@ type usageBlock struct {
 
 type anthropicDeltaEvent struct {
 	Delta struct {
-		Text string `json:"text"`
+		Text     string `json:"text"`
+		Thinking string `json:"thinking"`
 	} `json:"delta"`
 }
 

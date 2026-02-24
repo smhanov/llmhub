@@ -61,6 +61,9 @@ for chunk := range stream {
         log.Printf("stream error: %v", chunk.Err)
         break
     }
+    if chunk.ReasoningDelta != "" {
+        log.Printf("reasoning delta: %s", chunk.ReasoningDelta)
+    }
     fmt.Print(chunk.Delta)
     if chunk.Done {
         break
@@ -84,6 +87,25 @@ for _, part := range resp.Content {
     }
 }
 ```
+
+## Reasoning / Thinking Blocks
+
+Some models expose reasoning as separate blocks in the response payload. llmhub preserves those blocks in `Response.Content` as `*llmhub.ReasoningContent`.
+
+```go
+resp, _ := client.Generate(ctx, prompt)
+
+fmt.Println("final answer:", resp.Text())
+fmt.Println("reasoning:", resp.ReasoningText())
+
+for _, part := range resp.Content {
+    if r, ok := part.(*llmhub.ReasoningContent); ok {
+        fmt.Println("reasoning block:", r.Text)
+    }
+}
+```
+
+For streaming, reasoning is exposed separately on each chunk via `StreamChunk.ReasoningDelta`.
 
 ## Provider Registry
 
@@ -255,6 +277,7 @@ go run ./examples/cli [options]
 | `-max-tokens`  | Maximum tokens to generate                                                        |
 | `-input-cost`  | Cost per 1M input tokens in USD (for cost accounting)                             |
 | `-output-cost` | Cost per 1M output tokens in USD (for cost accounting)                            |
+| `-timeout`     | Request timeout duration (e.g. `30s`, `2m`, `10m`)                                 |
 
 ### Examples
 

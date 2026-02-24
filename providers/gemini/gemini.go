@@ -142,29 +142,49 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 		scanner := bufio.NewScanner(resp.Body)
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 4*1024*1024)
+		var pending strings.Builder
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" {
 				continue
 			}
-			var chunk geminiResponse
-			if err := json.Unmarshal([]byte(line), &chunk); err != nil {
-				ch <- llmhub.StreamChunk{Err: err, Done: true}
-				return
+			if strings.HasPrefix(line, "data:") {
+				line = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			}
-			text, err := extractText(chunk.Candidates)
-			if err != nil {
-				ch <- llmhub.StreamChunk{Err: err, Done: true}
-				return
-			}
-			if text == "" {
+			if line == "" || line == "[DONE]" {
 				continue
 			}
-			select {
-			case <-ctx.Done():
-				ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
-				return
-			case ch <- llmhub.StreamChunk{Delta: text}:
+			pending.WriteString(line)
+			payload := pending.String()
+			var parsed []geminiResponse
+			var chunk geminiResponse
+			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+				if strings.Contains(err.Error(), "unexpected end of JSON input") {
+					continue
+				}
+				if err := json.Unmarshal([]byte(payload), &parsed); err != nil {
+					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					return
+				}
+			} else {
+				parsed = []geminiResponse{chunk}
+			}
+			pending.Reset()
+			for _, current := range parsed {
+				text, reasoning, err := extractContent(current.Candidates)
+				if err != nil {
+					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					return
+				}
+				if text == "" && reasoning == "" {
+					continue
+				}
+				select {
+				case <-ctx.Done():
+					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					return
+				case ch <- llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning}:
+				}
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -334,6 +354,8 @@ func convertGeminiParts(parts []geminiPart) ([]llmhub.ContentPart, error) {
 	out := make([]llmhub.ContentPart, 0, len(parts))
 	for _, part := range parts {
 		switch {
+		case part.Text != "" && part.Thought:
+			out = append(out, llmhub.Reasoning(part.Text))
 		case part.Text != "":
 			out = append(out, llmhub.Text(part.Text))
 		case part.InlineData != nil:
@@ -346,18 +368,22 @@ func convertGeminiParts(parts []geminiPart) ([]llmhub.ContentPart, error) {
 	return out, nil
 }
 
-func extractText(candidates []candidate) (string, error) {
+func extractContent(candidates []candidate) (string, string, error) {
 	parts, err := convertCandidate(candidates)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	var b strings.Builder
+	var textBuilder strings.Builder
+	var reasoningBuilder strings.Builder
 	for _, part := range parts {
-		if text, ok := part.(*llmhub.TextContent); ok {
-			b.WriteString(text.Text)
+		switch value := part.(type) {
+		case *llmhub.TextContent:
+			textBuilder.WriteString(value.Text)
+		case *llmhub.ReasoningContent:
+			reasoningBuilder.WriteString(value.Text)
 		}
 	}
-	return b.String(), nil
+	return textBuilder.String(), reasoningBuilder.String(), nil
 }
 
 type geminiRequest struct {
@@ -380,6 +406,7 @@ type geminiContent struct {
 
 type geminiPart struct {
 	Text       string      `json:"text,omitempty"`
+	Thought    bool        `json:"thought,omitempty"`
 	InlineData *inlineData `json:"inline_data,omitempty"`
 	FileData   *fileData   `json:"file_data,omitempty"`
 }

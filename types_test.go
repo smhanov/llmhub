@@ -6,12 +6,26 @@ func TestResponseText(t *testing.T) {
 	resp := &Response{
 		Content: []ContentPart{
 			Text("hello "),
+			Reasoning("internal"),
 			&ImageContent{URL: "https://example.com/image.png"},
 			Text("world"),
 		},
 	}
 	if got := resp.Text(); got != "hello world" {
 		t.Fatalf("expected text to match, got %q", got)
+	}
+}
+
+func TestResponseReasoningText(t *testing.T) {
+	resp := &Response{
+		Content: []ContentPart{
+			Text("visible"),
+			Reasoning("step 1 "),
+			Reasoning("step 2"),
+		},
+	}
+	if got := resp.ReasoningText(); got != "step 1 step 2" {
+		t.Fatalf("expected reasoning text to match, got %q", got)
 	}
 }
 

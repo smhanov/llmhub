@@ -142,6 +142,28 @@ func TestOpenAIGenerate(t *testing.T) {
 	}
 }
 
+func TestOpenAIGenerateReasoningContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":[{"type":"text","text":"answer"},{"type":"reasoning","reasoning":"thought-a"}],"reasoning_content":"thought-b"}}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("test-model"), llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if resp.Text() != "answer" {
+		t.Fatalf("unexpected response text: %q", resp.Text())
+	}
+	if resp.ReasoningText() != "thought-athought-b" {
+		t.Fatalf("unexpected reasoning text: %q", resp.ReasoningText())
+	}
+}
+
 func TestOpenAIStream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -168,5 +190,59 @@ func TestOpenAIStream(t *testing.T) {
 	finalChunk := <-stream
 	if !finalChunk.Done {
 		t.Fatalf("expected done chunk: %+v", finalChunk)
+	}
+}
+
+func TestOpenAIStreamReasoning(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":[{\"type\":\"reasoning\",\"reasoning\":\"r1\"}]}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("m"), llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	chunk := <-stream
+	if chunk.ReasoningDelta != "r1" {
+		t.Fatalf("unexpected reasoning delta: %+v", chunk)
+	}
+	finalChunk := <-stream
+	if !finalChunk.Done {
+		t.Fatalf("expected done chunk: %+v", finalChunk)
+	}
+}
+
+func TestOpenAIStreamStringDeltaContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("m"), llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	chunk := <-stream
+	if chunk.Delta != "hello" {
+		t.Fatalf("unexpected delta: %+v", chunk)
 	}
 }

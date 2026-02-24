@@ -104,6 +104,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	if err != nil {
 		return nil, err
 	}
+	parts = appendReasoningParts(parts, decoded.Choices[0].Message.ReasoningContent, decoded.Choices[0].Message.Reasoning)
 	resp := &llmhub.Response{
 		ID:      decoded.ID,
 		Content: parts,
@@ -171,15 +172,20 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			if len(payload.Choices) == 0 {
 				continue
 			}
-			deltaText := extractDeltaText(payload.Choices[0].Delta.Content)
-			if deltaText == "" {
+			deltaText, reasoningDelta, err := extractDeltaContent(payload.Choices[0].Delta.Content)
+			if err != nil {
+				chunks <- llmhub.StreamChunk{Err: err, Done: true}
+				return
+			}
+			reasoningDelta = firstNonEmpty(reasoningDelta, payload.Choices[0].Delta.ReasoningContent, payload.Choices[0].Delta.Reasoning)
+			if deltaText == "" && reasoningDelta == "" {
 				continue
 			}
 			select {
 			case <-ctx.Done():
 				chunks <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
 				return
-			case chunks <- llmhub.StreamChunk{Delta: deltaText}:
+			case chunks <- llmhub.StreamChunk{Delta: deltaText, ReasoningDelta: reasoningDelta}:
 			}
 		}
 	}()
@@ -250,11 +256,16 @@ func convertToAPIMessage(msg *llmhub.Message) (chatMessage, error) {
 		if text, ok := msg.Content[0].(*llmhub.TextContent); ok {
 			return chatMessage{Role: string(msg.Role), Content: text.Text}, nil
 		}
+		if reasoning, ok := msg.Content[0].(*llmhub.ReasoningContent); ok {
+			return chatMessage{Role: string(msg.Role), Content: reasoning.Text}, nil
+		}
 	}
 	content := make([]messageContent, 0, len(msg.Content))
 	for _, part := range msg.Content {
 		switch v := part.(type) {
 		case *llmhub.TextContent:
+			content = append(content, messageContent{Type: "text", Text: v.Text})
+		case *llmhub.ReasoningContent:
 			content = append(content, messageContent{Type: "text", Text: v.Text})
 		case *llmhub.ImageContent:
 			content = append(content, messageContent{Type: "image_url", ImageURL: &imageURL{URL: v.URL, Detail: v.Detail}})
@@ -283,6 +294,9 @@ func convertFromAPIContent(raw json.RawMessage) ([]llmhub.ContentPart, error) {
 			switch block.Type {
 			case "text":
 				parts = append(parts, llmhub.Text(block.Text))
+			case "reasoning", "thinking", "reasoning_content", "redacted_thinking":
+				reasoning := firstNonEmpty(block.ReasoningContent, block.Reasoning, block.Thinking, block.Text)
+				parts = appendReasoningParts(parts, reasoning)
 			case "image_url":
 				if block.ImageURL != nil {
 					parts = append(parts, &llmhub.ImageContent{URL: block.ImageURL.URL, Detail: block.ImageURL.Detail})
@@ -298,14 +312,60 @@ func convertFromAPIContent(raw json.RawMessage) ([]llmhub.ContentPart, error) {
 	return nil, fmt.Errorf("openai: unable to decode content payload")
 }
 
-func extractDeltaText(blocks []messageContent) string {
-	var builder strings.Builder
-	for _, block := range blocks {
-		if block.Type == "text" {
-			builder.WriteString(block.Text)
+func extractDeltaContent(raw json.RawMessage) (string, string, error) {
+	if len(raw) == 0 {
+		return "", "", nil
+	}
+	if raw[0] == '"' {
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return "", "", err
+		}
+		return text, "", nil
+	}
+	var blocks []messageContent
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var builder strings.Builder
+		var reasoningBuilder strings.Builder
+		for _, block := range blocks {
+			switch block.Type {
+			case "text":
+				builder.WriteString(block.Text)
+			case "reasoning", "thinking", "reasoning_content", "redacted_thinking":
+				reasoningBuilder.WriteString(firstNonEmpty(block.ReasoningContent, block.Reasoning, block.Thinking, block.Text))
+			}
+		}
+		return builder.String(), reasoningBuilder.String(), nil
+	}
+	var block messageContent
+	if err := json.Unmarshal(raw, &block); err == nil {
+		switch block.Type {
+		case "text":
+			return block.Text, "", nil
+		case "reasoning", "thinking", "reasoning_content", "redacted_thinking":
+			return "", firstNonEmpty(block.ReasoningContent, block.Reasoning, block.Thinking, block.Text), nil
 		}
 	}
-	return builder.String()
+	return "", "", fmt.Errorf("openai: unable to decode stream delta payload")
+}
+
+func appendReasoningParts(parts []llmhub.ContentPart, candidates ...string) []llmhub.ContentPart {
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		parts = append(parts, llmhub.Reasoning(candidate))
+	}
+	return parts
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type completionRequest struct {
@@ -322,9 +382,12 @@ type chatMessage struct {
 }
 
 type messageContent struct {
-	Type     string    `json:"type"`
-	Text     string    `json:"text,omitempty"`
-	ImageURL *imageURL `json:"image_url,omitempty"`
+	Type             string    `json:"type"`
+	Text             string    `json:"text,omitempty"`
+	Reasoning        string    `json:"reasoning,omitempty"`
+	ReasoningContent string    `json:"reasoning_content,omitempty"`
+	Thinking         string    `json:"thinking,omitempty"`
+	ImageURL         *imageURL `json:"image_url,omitempty"`
 }
 
 type imageURL struct {
@@ -341,8 +404,10 @@ type completionResponse struct {
 }
 
 type chatMessageResponse struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+	Role             string          `json:"role"`
+	Content          json.RawMessage `json:"content"`
+	Reasoning        string          `json:"reasoning,omitempty"`
+	ReasoningContent string          `json:"reasoning_content,omitempty"`
 }
 
 type usageBlock struct {
@@ -355,7 +420,9 @@ type streamResponse struct {
 	ID      string `json:"id"`
 	Choices []struct {
 		Delta struct {
-			Content []messageContent `json:"content"`
+			Content          json.RawMessage `json:"content"`
+			Reasoning        string          `json:"reasoning,omitempty"`
+			ReasoningContent string          `json:"reasoning_content,omitempty"`
 		} `json:"delta"`
 	} `json:"choices"`
 }

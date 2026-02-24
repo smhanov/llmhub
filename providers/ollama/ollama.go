@@ -79,8 +79,13 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	if text == "" {
 		text = decoded.Response
 	}
+	parts := make([]llmhub.ContentPart, 0, 2)
+	if decoded.Message.Thinking != "" {
+		parts = append(parts, llmhub.Reasoning(decoded.Message.Thinking))
+	}
+	parts = append(parts, llmhub.Text(text))
 	return &llmhub.Response{
-		Content: []llmhub.ContentPart{llmhub.Text(text)},
+		Content: parts,
 		Usage: llmhub.UsageMetadata{
 			PromptTokens:     decoded.PromptEvalCount,
 			CompletionTokens: decoded.EvalCount,
@@ -143,7 +148,14 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				case <-ctx.Done():
 					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
 					return
-				case ch <- llmhub.StreamChunk{Delta: text}:
+				case ch <- llmhub.StreamChunk{Delta: text, ReasoningDelta: chunk.Message.Thinking}:
+				}
+			} else if chunk.Message.Thinking != "" {
+				select {
+				case <-ctx.Done():
+					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					return
+				case ch <- llmhub.StreamChunk{ReasoningDelta: chunk.Message.Thinking}:
 				}
 			}
 			if chunk.Done {
@@ -238,8 +250,9 @@ type chatRequest struct {
 }
 
 type ollamaMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role     string `json:"role"`
+	Content  string `json:"content"`
+	Thinking string `json:"thinking,omitempty"`
 }
 
 type chatResponse struct {
