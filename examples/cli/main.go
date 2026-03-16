@@ -34,7 +34,7 @@ func main() {
 	promptFile := flag.String("prompt-file", "", "File containing the prompt text")
 	stream := flag.Bool("stream", false, "Use streaming mode")
 	temperature := flag.Float64("temperature", 0.7, "Sampling temperature")
-	maxTokens := flag.Int("max-tokens", 0, "Maximum tokens to generate")
+	maxTokens := flag.Int("max-tokens", 0, "Hard cap on generated tokens; leave unset unless you need it")
 	images := flag.String("images", "", "Comma-separated list of image file paths or URLs")
 	inputCost := flag.Float64("input-cost", 0, "Cost per 1M input tokens in USD")
 	outputCost := flag.Float64("output-cost", 0, "Cost per 1M output tokens in USD")

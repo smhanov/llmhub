@@ -6,6 +6,9 @@ import "net/http"
 type Config struct {
 	Model           string
 	Temperature     float64
+	// MaxTokens applies a hard cap to generated output tokens.
+	// Leave this unset unless you specifically need that cap, because values
+	// that are too low can cause the model to return truncated output.
 	MaxTokens       int
 	APIKey          string
 	BaseURL         string
@@ -71,7 +74,10 @@ func WithTemperature(temp float64) Option {
 	}
 }
 
-// WithMaxTokens constrains the number of generated tokens.
+// WithMaxTokens applies a hard cap to the number of generated tokens.
+//
+// Prefer leaving this unset unless you specifically need a strict output
+// limit, because setting it too low often causes truncated responses.
 func WithMaxTokens(max int) Option {
 	return func(c *Config) {
 		c.MaxTokens = max

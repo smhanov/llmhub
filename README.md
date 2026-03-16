@@ -166,9 +166,13 @@ Each provider reads the shared functional options:
 
 - `WithAPIKey` – supply SaaS credentials (`openai`, `anthropic`, `gemini`).
 - `WithBaseURL` – point to proxies/self-hosted gateways.
-- `WithModel`, `WithTemperature`, `WithMaxTokens` – customize LLM behavior per call.
+- `WithModel`, `WithTemperature` – customize LLM behavior per call. Often it is best to omit and go with the defaults.
+- `WithMaxTokens` – only set this when you truly need a hard output cap; otherwise leave it unset to reduce the risk of truncated responses.
 - `WithWebSearch` – enable web search/grounding (Gemini: `google_search` tool).
 - `WithCost` – set per-million-token pricing for cost accounting.
+
+> [!WARNING]
+> Prefer not to use `WithMaxTokens` in normal application code. Provider defaults usually produce more complete answers, while an explicit cap that is too low commonly causes cut-off output.
 
 ## Cost Accounting
 
@@ -274,7 +278,7 @@ go run ./examples/cli [options]
 | `-images`      | Comma-separated list of image file paths or URLs                                  |
 | `-stream`      | Enable streaming mode                                                             |
 | `-temperature` | Sampling temperature (default: 0.7)                                               |
-| `-max-tokens`  | Maximum tokens to generate                                                        |
+| `-max-tokens`  | Hard cap on generated tokens; leave unset unless needed to avoid truncation       |
 | `-input-cost`  | Cost per 1M input tokens in USD (for cost accounting)                             |
 | `-output-cost` | Cost per 1M output tokens in USD (for cost accounting)                            |
 | `-timeout`     | Request timeout duration (e.g. `30s`, `2m`, `10m`)                                 |
