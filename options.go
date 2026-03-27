@@ -16,6 +16,12 @@ type Config struct {
 	Headers         map[string]string
 	EnableWebSearch bool // Enables web search/grounding (Gemini: google_search, Perplexity: always on)
 
+	// ResponseModalities controls the output modalities the model should
+	// produce. For example, setting this to []string{"IMAGE"} tells the
+	// Gemini image-generation models to return an image instead of text.
+	// Leave nil for the provider default (text).
+	ResponseModalities []string
+
 	// Cost accounting: prices expressed per 1 million tokens.
 	InputCostPerMillionTokens  float64
 	OutputCostPerMillionTokens float64
@@ -56,6 +62,10 @@ func (c Config) Clone() Config {
 		for k, v := range c.Headers {
 			clone.Headers[k] = v
 		}
+	}
+	if c.ResponseModalities != nil {
+		clone.ResponseModalities = make([]string, len(c.ResponseModalities))
+		copy(clone.ResponseModalities, c.ResponseModalities)
 	}
 	return clone
 }
@@ -121,6 +131,16 @@ func WithHeader(key, value string) Option {
 func WithWebSearch(enabled bool) Option {
 	return func(c *Config) {
 		c.EnableWebSearch = enabled
+	}
+}
+
+// WithResponseModalities specifies the output modalities the model should produce.
+// For Gemini image-generation models (e.g. gemini-2.5-flash-image), pass "IMAGE"
+// to receive image output. Pass "TEXT" and "IMAGE" together to allow mixed output.
+// Leave unset for the provider default (text only).
+func WithResponseModalities(modalities ...string) Option {
+	return func(c *Config) {
+		c.ResponseModalities = modalities
 	}
 }
 

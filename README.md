@@ -169,10 +169,58 @@ Each provider reads the shared functional options:
 - `WithModel`, `WithTemperature` – customize LLM behavior per call. Often it is best to omit and go with the defaults.
 - `WithMaxTokens` – only set this when you truly need a hard output cap; otherwise leave it unset to reduce the risk of truncated responses.
 - `WithWebSearch` – enable web search/grounding (Gemini: `google_search` tool).
+- `WithResponseModalities` – control output modalities (e.g. `"IMAGE"` for Gemini image generation).
 - `WithCost` – set per-million-token pricing for cost accounting.
 
 > [!WARNING]
 > Prefer not to use `WithMaxTokens` in normal application code. Provider defaults usually produce more complete answers, while an explicit cap that is too low commonly causes cut-off output.
+
+## Image Generation / Output Modalities
+
+Gemini image-generation models (e.g. `gemini-2.5-flash-image`) can return images
+instead of—or alongside—text. Use `WithResponseModalities` to tell the model
+which output types you want:
+
+```go
+import (
+    "github.com/smhanov/llmhub"
+    _ "github.com/smhanov/llmhub/providers/gemini"
+)
+
+client, _ := llmhub.New("gemini", apiKey,
+    llmhub.WithModel("gemini-2.5-flash-image"),
+    llmhub.WithResponseModalities("IMAGE"),
+)
+
+prompt := []*llmhub.Message{
+    llmhub.NewUserMessage(
+        llmhub.Text("Upscale this image to 800 pixels wide."),
+        llmhub.Image("data:image/jpeg;base64,/9j/4AAQ..."),
+    ),
+}
+
+resp, _ := client.Generate(ctx, prompt)
+
+for _, part := range resp.Content {
+    if img, ok := part.(*llmhub.ImageContent); ok {
+        // img.URL is a data URL: "data:image/png;base64,..."
+        fmt.Println("Got image:", len(img.URL), "bytes")
+    }
+}
+```
+
+Pass `"TEXT"` and `"IMAGE"` together to allow mixed text+image output:
+
+```go
+llmhub.WithResponseModalities("TEXT", "IMAGE")
+```
+
+| Provider  | Image Output Support                          |
+| --------- | --------------------------------------------- |
+| Gemini    | ✅ Via `WithResponseModalities("IMAGE")`      |
+| OpenAI    | ❌ Use the Images API directly                |
+| Anthropic | ❌ Not supported                              |
+| Ollama    | ❌ Not supported                              |
 
 ## Cost Accounting
 

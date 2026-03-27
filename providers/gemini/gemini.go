@@ -242,13 +242,16 @@ func buildRequestBody(prompt []*llmhub.Message, cfg llmhub.Config) ([]byte, erro
 	if system != nil {
 		req.SystemInstruction = system
 	}
-	if cfg.Temperature != 0 || cfg.MaxTokens != 0 {
+	if cfg.Temperature != 0 || cfg.MaxTokens != 0 || len(cfg.ResponseModalities) > 0 {
 		req.GenerationConfig = &generationConfig{}
 		if cfg.Temperature != 0 {
 			req.GenerationConfig.Temperature = cfg.Temperature
 		}
 		if cfg.MaxTokens != 0 {
 			req.GenerationConfig.MaxOutputTokens = cfg.MaxTokens
+		}
+		if len(cfg.ResponseModalities) > 0 {
+			req.GenerationConfig.ResponseModalities = cfg.ResponseModalities
 		}
 	}
 	if cfg.EnableWebSearch {
@@ -388,13 +391,13 @@ func extractContent(candidates []candidate) (string, string, error) {
 
 type geminiRequest struct {
 	Contents          []geminiContent   `json:"contents"`
-	SystemInstruction *geminiContent    `json:"system_instruction,omitempty"`
-	GenerationConfig  *generationConfig `json:"generation_config,omitempty"`
+	SystemInstruction *geminiContent    `json:"systemInstruction,omitempty"`
+	GenerationConfig  *generationConfig `json:"generationConfig,omitempty"`
 	Tools             []geminiTool      `json:"tools,omitempty"`
 }
 
 type geminiTool struct {
-	GoogleSearch *googleSearchTool `json:"google_search,omitempty"`
+	GoogleSearch *googleSearchTool `json:"googleSearch,omitempty"`
 }
 
 type googleSearchTool struct{}
@@ -407,27 +410,28 @@ type geminiContent struct {
 type geminiPart struct {
 	Text       string      `json:"text,omitempty"`
 	Thought    bool        `json:"thought,omitempty"`
-	InlineData *inlineData `json:"inline_data,omitempty"`
-	FileData   *fileData   `json:"file_data,omitempty"`
+	InlineData *inlineData `json:"inlineData,omitempty"`
+	FileData   *fileData   `json:"fileData,omitempty"`
 }
 
 type inlineData struct {
-	MimeType string `json:"mime_type"`
+	MimeType string `json:"mimeType"`
 	Data     string `json:"data"`
 }
 
 type fileData struct {
-	FileURI string `json:"file_uri"`
+	FileURI string `json:"fileUri"`
 }
 
 type generationConfig struct {
-	Temperature     float64 `json:"temperature,omitempty"`
-	MaxOutputTokens int     `json:"max_output_tokens,omitempty"`
+	Temperature        float64  `json:"temperature,omitempty"`
+	MaxOutputTokens    int      `json:"maxOutputTokens,omitempty"`
+	ResponseModalities []string `json:"responseModalities,omitempty"`
 }
 
 type geminiResponse struct {
 	Candidates []candidate   `json:"candidates"`
-	Usage      usageMetadata `json:"usage_metadata"`
+	Usage      usageMetadata `json:"usageMetadata"`
 }
 
 type candidate struct {
@@ -435,7 +439,7 @@ type candidate struct {
 }
 
 type usageMetadata struct {
-	PromptTokenCount     int `json:"prompt_token_count"`
-	CandidatesTokenCount int `json:"candidates_token_count"`
-	TotalTokenCount      int `json:"total_token_count"`
+	PromptTokenCount     int `json:"promptTokenCount"`
+	CandidatesTokenCount int `json:"candidatesTokenCount"`
+	TotalTokenCount      int `json:"totalTokenCount"`
 }
