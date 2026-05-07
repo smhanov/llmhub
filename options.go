@@ -4,8 +4,8 @@ import "net/http"
 
 // Config captures all tunable request options shared across providers.
 type Config struct {
-	Model           string
-	Temperature     float64
+	Model       string
+	Temperature float64
 	// MaxTokens applies a hard cap to generated output tokens.
 	// Leave this unset unless you specifically need that cap, because values
 	// that are too low can cause the model to return truncated output.
@@ -15,6 +15,8 @@ type Config struct {
 	HTTPClient      *http.Client
 	Headers         map[string]string
 	EnableWebSearch bool // Enables web search/grounding (Gemini: google_search, Perplexity: always on)
+	Tools           []Tool
+	ToolChoice      *ToolChoice
 
 	// ResponseModalities controls the output modalities the model should
 	// produce. For example, setting this to []string{"IMAGE"} tells the
@@ -66,6 +68,16 @@ func (c Config) Clone() Config {
 	if c.ResponseModalities != nil {
 		clone.ResponseModalities = make([]string, len(c.ResponseModalities))
 		copy(clone.ResponseModalities, c.ResponseModalities)
+	}
+	if c.Tools != nil {
+		clone.Tools = make([]Tool, len(c.Tools))
+		for i, tool := range c.Tools {
+			clone.Tools[i] = cloneTool(tool)
+		}
+	}
+	if c.ToolChoice != nil {
+		choice := *c.ToolChoice
+		clone.ToolChoice = &choice
 	}
 	return clone
 }
@@ -134,6 +146,23 @@ func WithWebSearch(enabled bool) Option {
 	}
 }
 
+// WithTools supplies callable tools the model may request.
+func WithTools(tools ...Tool) Option {
+	return func(c *Config) {
+		c.Tools = make([]Tool, len(tools))
+		for i, tool := range tools {
+			c.Tools[i] = cloneTool(tool)
+		}
+	}
+}
+
+// WithToolChoice controls whether supplied tools may, must, or must not be used.
+func WithToolChoice(choice ToolChoice) Option {
+	return func(c *Config) {
+		c.ToolChoice = &choice
+	}
+}
+
 // WithResponseModalities specifies the output modalities the model should produce.
 // For Gemini image-generation models (e.g. gemini-2.5-flash-image), pass "IMAGE"
 // to receive image output. Pass "TEXT" and "IMAGE" together to allow mixed output.
@@ -159,4 +188,39 @@ func mergeOptions(defaults []Option, overrides []Option) []Option {
 	combined = append(combined, defaults...)
 	combined = append(combined, overrides...)
 	return combined
+}
+
+func cloneTool(tool Tool) Tool {
+	clone := tool
+	if tool.Parameters != nil {
+		clone.Parameters = cloneMap(tool.Parameters)
+	}
+	return clone
+}
+
+func cloneMap(in map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(in))
+	for k, v := range in {
+		out[k] = cloneValue(v)
+	}
+	return out
+}
+
+func cloneValue(v interface{}) interface{} {
+	switch typed := v.(type) {
+	case map[string]interface{}:
+		return cloneMap(typed)
+	case []interface{}:
+		out := make([]interface{}, len(typed))
+		for i, item := range typed {
+			out[i] = cloneValue(item)
+		}
+		return out
+	case []string:
+		out := make([]string, len(typed))
+		copy(out, typed)
+		return out
+	default:
+		return typed
+	}
 }

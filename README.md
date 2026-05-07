@@ -6,6 +6,7 @@ Unified, provider-agnostic Go client for modern Large Language Models (LLMs). ll
 
 - **One API, many vendors** – swap providers without rewriting your business logic.
 - **Multi-modal ready** – mix text and images in both requests and responses.
+- **Tool calling** – declare provider-agnostic tools and handle normalized tool calls.
 - **Streaming made simple** – consume deltas through idiomatic Go channels.
 - **Extensible registry** – register first-party or external providers at runtime.
 - **Functional options** – configure models, endpoints, and credentials cleanly.
@@ -107,6 +108,51 @@ for _, part := range resp.Content {
 
 For streaming, reasoning is exposed separately on each chunk via `StreamChunk.ReasoningDelta`.
 
+## Tool Calling
+
+Declare tools with `WithTools`, read requested calls from `Response.ToolCalls()`, execute them in your code, then send the result back with `NewToolResultMessage`.
+
+```go
+weather := llmhub.NewTool("weather", "Get current weather", map[string]interface{}{
+    "type": "object",
+    "properties": map[string]interface{}{
+        "city": map[string]interface{}{"type": "string"},
+    },
+    "required": []string{"city"},
+})
+
+client, _ := llmhub.New("openai", apiKey,
+    llmhub.WithModel("gpt-4o-mini"),
+    llmhub.WithTools(weather),
+    llmhub.WithToolChoice(llmhub.AutoToolChoice()),
+)
+
+messages := []*llmhub.Message{
+    llmhub.NewUserMessage(llmhub.Text("What is the weather in Toronto?")),
+}
+
+resp, _ := client.Generate(ctx, messages)
+for _, call := range resp.ToolCalls() {
+    result := runTool(call.Name, call.Arguments)
+    messages = append(messages,
+        llmhub.NewAssistantMessage(llmhub.ToolCall(call.ID, call.Name, call.Arguments)),
+        llmhub.NewToolResultMessage(call.ID, call.Name, llmhub.Text(result)),
+    )
+}
+
+finalResp, _ := client.Generate(ctx, messages)
+fmt.Println(finalResp.Text())
+```
+
+Tool choice helpers include `AutoToolChoice`, `NoToolChoice`, `RequiredToolChoice`, and `NamedToolChoice("tool_name")` for providers that expose tool-choice controls. Streaming tool calls are exposed on `StreamChunk.ToolCalls`.
+
+| Provider  | Tool Calling Support |
+| --------- | -------------------- |
+| OpenAI    | ✅ Chat Completions tools |
+| Anthropic | ✅ Messages API tools |
+| Gemini    | ✅ Function declarations |
+| Ollama    | ✅ Native `/api/chat` tools |
+
 ## Provider Registry
 
 Add your own provider in a different module:
@@ -169,6 +215,7 @@ Each provider reads the shared functional options:
 - `WithModel`, `WithTemperature` – customize LLM behavior per call. Often it is best to omit and go with the defaults.
 - `WithMaxTokens` – only set this when you truly need a hard output cap; otherwise leave it unset to reduce the risk of truncated responses.
 - `WithWebSearch` – enable web search/grounding (Gemini: `google_search` tool).
+- `WithTools`, `WithToolChoice` – enable user-defined tool calling.
 - `WithResponseModalities` – control output modalities (e.g. `"IMAGE"` for Gemini image generation).
 - `WithCost` – set per-million-token pricing for cost accounting.
 

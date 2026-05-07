@@ -171,19 +171,19 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			}
 			pending.Reset()
 			for _, current := range parsed {
-				text, reasoning, err := extractContent(current.Candidates)
+				text, reasoning, toolCalls, err := extractContent(current.Candidates)
 				if err != nil {
 					ch <- llmhub.StreamChunk{Err: err, Done: true}
 					return
 				}
-				if text == "" && reasoning == "" {
+				if text == "" && reasoning == "" && len(toolCalls) == 0 {
 					continue
 				}
 				select {
 				case <-ctx.Done():
 					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
 					return
-				case ch <- llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning}:
+				case ch <- llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning, ToolCalls: toolCalls}:
 				}
 			}
 		}
@@ -255,9 +255,13 @@ func buildRequestBody(prompt []*llmhub.Message, cfg llmhub.Config) ([]byte, erro
 		}
 	}
 	if cfg.EnableWebSearch {
-		req.Tools = []geminiTool{
-			{GoogleSearch: &googleSearchTool{}},
-		}
+		req.Tools = append(req.Tools, geminiTool{GoogleSearch: &googleSearchTool{}})
+	}
+	if len(cfg.Tools) > 0 {
+		req.Tools = append(req.Tools, geminiTool{FunctionDeclarations: convertTools(cfg.Tools)})
+	}
+	if cfg.ToolChoice != nil {
+		req.ToolConfig = convertToolChoice(*cfg.ToolChoice)
 	}
 	return json.Marshal(req)
 }
@@ -276,6 +280,12 @@ func convertMessages(prompt []*llmhub.Message) ([]geminiContent, *geminiContent,
 				return nil, nil, err
 			}
 			systemParts = append(systemParts, parts...)
+		case llmhub.RoleTool:
+			part, err := convertToolResult(msg)
+			if err != nil {
+				return nil, nil, err
+			}
+			contents = append(contents, geminiContent{Role: "user", Parts: []geminiPart{part}})
 		default:
 			parts, err := convertParts(msg.Content)
 			if err != nil {
@@ -308,6 +318,12 @@ func convertParts(parts []llmhub.ContentPart) ([]geminiPart, error) {
 			} else {
 				converted = append(converted, geminiPart{InlineData: inline})
 			}
+		case *llmhub.ToolCallContent:
+			args, err := rawJSON(v.Arguments)
+			if err != nil {
+				return nil, err
+			}
+			converted = append(converted, geminiPart{FunctionCall: &functionCall{Name: v.Name, Args: args}})
 		default:
 			return nil, fmt.Errorf("gemini: unsupported content type %T", v)
 		}
@@ -366,27 +382,109 @@ func convertGeminiParts(parts []geminiPart) ([]llmhub.ContentPart, error) {
 			out = append(out, &llmhub.ImageContent{URL: dataURL})
 		case part.FileData != nil:
 			out = append(out, &llmhub.ImageContent{URL: part.FileData.FileURI})
+		case part.FunctionCall != nil:
+			out = append(out, llmhub.ToolCall("", part.FunctionCall.Name, string(part.FunctionCall.Args)))
 		}
 	}
 	return out, nil
 }
 
-func extractContent(candidates []candidate) (string, string, error) {
+func extractContent(candidates []candidate) (string, string, []*llmhub.ToolCallContent, error) {
 	parts, err := convertCandidate(candidates)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	var textBuilder strings.Builder
 	var reasoningBuilder strings.Builder
+	var toolCalls []*llmhub.ToolCallContent
 	for _, part := range parts {
 		switch value := part.(type) {
 		case *llmhub.TextContent:
 			textBuilder.WriteString(value.Text)
 		case *llmhub.ReasoningContent:
 			reasoningBuilder.WriteString(value.Text)
+		case *llmhub.ToolCallContent:
+			toolCalls = append(toolCalls, value)
 		}
 	}
-	return textBuilder.String(), reasoningBuilder.String(), nil
+	return textBuilder.String(), reasoningBuilder.String(), toolCalls, nil
+}
+
+func convertTools(tools []llmhub.Tool) []functionDeclaration {
+	converted := make([]functionDeclaration, 0, len(tools))
+	for _, tool := range tools {
+		converted = append(converted, functionDeclaration{
+			Name:        tool.Name,
+			Description: tool.Description,
+			Parameters:  tool.Parameters,
+		})
+	}
+	return converted
+}
+
+func convertToolChoice(choice llmhub.ToolChoice) *geminiToolConfig {
+	config := &geminiToolConfig{FunctionCallingConfig: &functionCallingConfig{}}
+	switch choice.Mode {
+	case llmhub.ToolChoiceNone:
+		config.FunctionCallingConfig.Mode = "NONE"
+	case llmhub.ToolChoiceRequired:
+		config.FunctionCallingConfig.Mode = "ANY"
+	case llmhub.ToolChoiceNamed:
+		config.FunctionCallingConfig.Mode = "ANY"
+		config.FunctionCallingConfig.AllowedFunctionNames = []string{choice.Name}
+	default:
+		config.FunctionCallingConfig.Mode = "AUTO"
+	}
+	return config
+}
+
+func convertToolResult(msg *llmhub.Message) (geminiPart, error) {
+	text, err := flattenText(msg.Content)
+	if err != nil {
+		return geminiPart{}, err
+	}
+	response := map[string]interface{}{"result": text}
+	if json.Valid([]byte(text)) {
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(text), &parsed); err == nil && parsed != nil {
+			response = parsed
+		}
+	}
+	return geminiPart{
+		FunctionResponse: &functionResponse{
+			Name:     metaValue(msg, "name"),
+			Response: response,
+		},
+	}, nil
+}
+
+func flattenText(parts []llmhub.ContentPart) (string, error) {
+	var b strings.Builder
+	for _, part := range parts {
+		text, ok := part.(*llmhub.TextContent)
+		if !ok {
+			return "", fmt.Errorf("gemini: tool results must be text content")
+		}
+		b.WriteString(text.Text)
+	}
+	return b.String(), nil
+}
+
+func rawJSON(arguments string) (json.RawMessage, error) {
+	if strings.TrimSpace(arguments) == "" {
+		return json.RawMessage(`{}`), nil
+	}
+	if !json.Valid([]byte(arguments)) {
+		return nil, fmt.Errorf("gemini: tool call arguments must be valid JSON")
+	}
+	return json.RawMessage(arguments), nil
+}
+
+func metaValue(msg *llmhub.Message, key string) string {
+	if msg == nil || msg.Meta == nil {
+		return ""
+	}
+	return msg.Meta[key]
 }
 
 type geminiRequest struct {
@@ -394,13 +492,30 @@ type geminiRequest struct {
 	SystemInstruction *geminiContent    `json:"systemInstruction,omitempty"`
 	GenerationConfig  *generationConfig `json:"generationConfig,omitempty"`
 	Tools             []geminiTool      `json:"tools,omitempty"`
+	ToolConfig        *geminiToolConfig `json:"toolConfig,omitempty"`
 }
 
 type geminiTool struct {
-	GoogleSearch *googleSearchTool `json:"googleSearch,omitempty"`
+	GoogleSearch         *googleSearchTool     `json:"googleSearch,omitempty"`
+	FunctionDeclarations []functionDeclaration `json:"functionDeclarations,omitempty"`
 }
 
 type googleSearchTool struct{}
+
+type functionDeclaration struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	Parameters  map[string]interface{} `json:"parameters,omitempty"`
+}
+
+type geminiToolConfig struct {
+	FunctionCallingConfig *functionCallingConfig `json:"functionCallingConfig,omitempty"`
+}
+
+type functionCallingConfig struct {
+	Mode                 string   `json:"mode,omitempty"`
+	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
+}
 
 type geminiContent struct {
 	Role  string       `json:"role,omitempty"`
@@ -408,10 +523,22 @@ type geminiContent struct {
 }
 
 type geminiPart struct {
-	Text       string      `json:"text,omitempty"`
-	Thought    bool        `json:"thought,omitempty"`
-	InlineData *inlineData `json:"inlineData,omitempty"`
-	FileData   *fileData   `json:"fileData,omitempty"`
+	Text             string            `json:"text,omitempty"`
+	Thought          bool              `json:"thought,omitempty"`
+	InlineData       *inlineData       `json:"inlineData,omitempty"`
+	FileData         *fileData         `json:"fileData,omitempty"`
+	FunctionCall     *functionCall     `json:"functionCall,omitempty"`
+	FunctionResponse *functionResponse `json:"functionResponse,omitempty"`
+}
+
+type functionCall struct {
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args,omitempty"`
+}
+
+type functionResponse struct {
+	Name     string                 `json:"name"`
+	Response map[string]interface{} `json:"response"`
 }
 
 type inlineData struct {

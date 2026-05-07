@@ -65,6 +65,46 @@ func TestGeminiGenerateReasoning(t *testing.T) {
 	}
 }
 
+func TestGeminiGenerateToolCalls(t *testing.T) {
+	tool := llmhub.NewTool("weather", "Get weather", map[string]interface{}{"type": "object"})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		body, _ := io.ReadAll(r.Body)
+		var req geminiRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Tools) != 1 || len(req.Tools[0].FunctionDeclarations) != 1 || req.Tools[0].FunctionDeclarations[0].Name != "weather" {
+			t.Fatalf("expected weather tool, got %+v", req.Tools)
+		}
+		if req.ToolConfig == nil || req.ToolConfig.FunctionCallingConfig.Mode != "ANY" {
+			t.Fatalf("unexpected tool config: %+v", req.ToolConfig)
+		}
+		if len(req.Contents) != 3 || req.Contents[1].Parts[0].FunctionCall == nil || req.Contents[2].Parts[0].FunctionResponse == nil {
+			t.Fatalf("unexpected tool contents: %+v", req.Contents)
+		}
+		io.WriteString(w, `{"candidates":[{"content":{"parts":[{"functionCall":{"name":"weather","args":{"city":"Toronto"}}}]}}],"usage_metadata":{"prompt_token_count":1,"candidates_token_count":2,"total_token_count":3}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("secret", llmhub.WithBaseURL(server.URL), llmhub.WithModel("flash-test"), llmhub.WithTools(tool), llmhub.WithToolChoice(llmhub.NamedToolChoice("weather")))
+	if err != nil {
+		t.Fatalf("provider new: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("weather?")),
+		llmhub.NewAssistantMessage(llmhub.ToolCall("", "weather", `{"city":"Paris"}`)),
+		llmhub.NewToolResultMessage("", "weather", llmhub.Text(`{"temp":20}`)),
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	calls := resp.ToolCalls()
+	if len(calls) != 1 || calls[0].Name != "weather" || calls[0].Arguments != `{"city":"Toronto"}` {
+		t.Fatalf("unexpected tool calls: %+v", calls)
+	}
+}
+
 func TestGeminiStream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `{"candidates":[{"content":{"parts":[{"text":"foo"}]}}]}`)

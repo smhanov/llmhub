@@ -42,3 +42,17 @@ func TestMessageHelpers(t *testing.T) {
 		t.Fatalf("expected two content parts after append")
 	}
 }
+
+func TestToolHelpers(t *testing.T) {
+	call := ToolCall("call-1", "lookup", `{"id":"42"}`)
+	resp := &Response{Content: []ContentPart{Text("checking"), call}}
+	calls := resp.ToolCalls()
+	if len(calls) != 1 || calls[0].Name != "lookup" || calls[0].Arguments != `{"id":"42"}` {
+		t.Fatalf("unexpected tool calls: %+v", calls)
+	}
+
+	msg := NewToolResultMessage("call-1", "lookup", Text(`{"ok":true}`))
+	if msg.Role != RoleTool || msg.Meta["tool_call_id"] != "call-1" || msg.Meta["name"] != "lookup" {
+		t.Fatalf("unexpected tool result message: %+v", msg)
+	}
+}

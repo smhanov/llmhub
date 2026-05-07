@@ -31,3 +31,30 @@ func TestWithOptions(t *testing.T) {
 		t.Fatalf("expected output cost 10.0, got %v", cfg.OutputCostPerMillionTokens)
 	}
 }
+
+func TestToolOptionsClone(t *testing.T) {
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"city": map[string]interface{}{"type": "string"},
+		},
+	}
+	cfg := NewConfig(
+		WithTools(NewTool("weather", "Get weather", schema)),
+		WithToolChoice(NamedToolChoice("weather")),
+	)
+	schema["type"] = "mutated"
+
+	if len(cfg.Tools) != 1 || cfg.Tools[0].Parameters["type"] != "object" {
+		t.Fatalf("tool option should clone schemas, got %+v", cfg.Tools)
+	}
+	if cfg.ToolChoice == nil || cfg.ToolChoice.Mode != ToolChoiceNamed || cfg.ToolChoice.Name != "weather" {
+		t.Fatalf("unexpected tool choice: %+v", cfg.ToolChoice)
+	}
+
+	clone := cfg.Clone()
+	clone.Tools[0].Parameters["type"] = "changed"
+	if cfg.Tools[0].Parameters["type"] != "object" {
+		t.Fatalf("config clone should isolate tool schemas")
+	}
+}

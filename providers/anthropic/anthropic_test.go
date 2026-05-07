@@ -68,6 +68,46 @@ func TestAnthropicGenerateReasoning(t *testing.T) {
 	}
 }
 
+func TestAnthropicGenerateToolCalls(t *testing.T) {
+	tool := llmhub.NewTool("weather", "Get weather", map[string]interface{}{"type": "object"})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		data, _ := io.ReadAll(r.Body)
+		var req anthropicRequest
+		if err := json.Unmarshal(data, &req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Tools) != 1 || req.Tools[0].Name != "weather" {
+			t.Fatalf("expected weather tool, got %+v", req.Tools)
+		}
+		if req.ToolChoice == nil || req.ToolChoice.Type != "tool" || req.ToolChoice.Name != "weather" {
+			t.Fatalf("unexpected tool choice: %+v", req.ToolChoice)
+		}
+		if len(req.Messages) != 3 || req.Messages[1].Content[0].Type != "tool_use" || req.Messages[2].Content[0].ToolUseID != "toolu-1" {
+			t.Fatalf("unexpected tool messages: %+v", req.Messages)
+		}
+		io.WriteString(w, `{"id":"msg","content":[{"type":"tool_use","id":"toolu-2","name":"weather","input":{"city":"Toronto"}}],"usage":{"input_tokens":5,"output_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("claude-test"), llmhub.WithBaseURL(server.URL), llmhub.WithTools(tool), llmhub.WithToolChoice(llmhub.NamedToolChoice("weather")))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("weather?")),
+		llmhub.NewAssistantMessage(llmhub.ToolCall("toolu-1", "weather", `{"city":"Paris"}`)),
+		llmhub.NewToolResultMessage("toolu-1", "weather", llmhub.Text(`{"temp":20}`)),
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	calls := resp.ToolCalls()
+	if len(calls) != 1 || calls[0].ID != "toolu-2" || calls[0].Arguments != `{"city":"Toronto"}` {
+		t.Fatalf("unexpected tool calls: %+v", calls)
+	}
+}
+
 func TestAnthropicStream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

@@ -84,6 +84,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 		parts = append(parts, llmhub.Reasoning(decoded.Message.Thinking))
 	}
 	parts = append(parts, llmhub.Text(text))
+	parts = appendToolCallParts(parts, decoded.Message.ToolCalls)
 	return &llmhub.Response{
 		Content: parts,
 		Usage: llmhub.UsageMetadata{
@@ -148,7 +149,11 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				case <-ctx.Done():
 					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
 					return
-				case ch <- llmhub.StreamChunk{Delta: text, ReasoningDelta: chunk.Message.Thinking}:
+				case ch <- llmhub.StreamChunk{
+					Delta:          text,
+					ReasoningDelta: chunk.Message.Thinking,
+					ToolCalls:      toolCallsFromAPI(chunk.Message.ToolCalls),
+				}:
 				}
 			} else if chunk.Message.Thinking != "" {
 				select {
@@ -156,6 +161,13 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
 					return
 				case ch <- llmhub.StreamChunk{ReasoningDelta: chunk.Message.Thinking}:
+				}
+			} else if len(chunk.Message.ToolCalls) > 0 {
+				select {
+				case <-ctx.Done():
+					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					return
+				case ch <- llmhub.StreamChunk{ToolCalls: toolCallsFromAPI(chunk.Message.ToolCalls)}:
 				}
 			}
 			if chunk.Done {
@@ -197,16 +209,19 @@ func buildChatRequest(prompt []*llmhub.Message, cfg llmhub.Config, stream bool) 
 		if msg == nil {
 			continue
 		}
-		text, err := flattenText(msg.Content)
+		converted, err := convertMessage(msg)
 		if err != nil {
 			return nil, err
 		}
-		msgs = append(msgs, ollamaMessage{Role: string(msg.Role), Content: text})
+		msgs = append(msgs, converted)
 	}
 	req := chatRequest{
 		Model:    cfg.Model,
 		Messages: msgs,
 		Stream:   stream,
+	}
+	if len(cfg.Tools) > 0 {
+		req.Tools = convertTools(cfg.Tools)
 	}
 	if cfg.Temperature != 0 || cfg.MaxTokens != 0 {
 		req.Options = map[string]interface{}{}
@@ -220,6 +235,45 @@ func buildChatRequest(prompt []*llmhub.Message, cfg llmhub.Config, stream bool) 
 	return json.Marshal(req)
 }
 
+func convertMessage(msg *llmhub.Message) (ollamaMessage, error) {
+	if msg.Role == llmhub.RoleTool {
+		text, err := flattenText(msg.Content)
+		if err != nil {
+			return ollamaMessage{}, err
+		}
+		return ollamaMessage{
+			Role:       string(msg.Role),
+			Content:    text,
+			Name:       metaValue(msg, "name"),
+			ToolCallID: metaValue(msg, "tool_call_id"),
+		}, nil
+	}
+	var textBuilder strings.Builder
+	var toolCalls []ollamaToolCall
+	for _, part := range msg.Content {
+		switch v := part.(type) {
+		case *llmhub.TextContent:
+			textBuilder.WriteString(v.Text)
+		case *llmhub.ToolCallContent:
+			args, err := parseArguments(v.Arguments)
+			if err != nil {
+				return ollamaMessage{}, err
+			}
+			toolCalls = append(toolCalls, ollamaToolCall{
+				ID:   v.ID,
+				Type: "function",
+				Function: ollamaFunctionCall{
+					Name:      v.Name,
+					Arguments: args,
+				},
+			})
+		default:
+			return ollamaMessage{}, fmt.Errorf("ollama: only text and tool call content are supported")
+		}
+	}
+	return ollamaMessage{Role: string(msg.Role), Content: textBuilder.String(), ToolCalls: toolCalls}, nil
+}
+
 func flattenText(parts []llmhub.ContentPart) (string, error) {
 	var b strings.Builder
 	for _, part := range parts {
@@ -230,6 +284,58 @@ func flattenText(parts []llmhub.ContentPart) (string, error) {
 		b.WriteString(text.Text)
 	}
 	return b.String(), nil
+}
+
+func convertTools(tools []llmhub.Tool) []ollamaTool {
+	converted := make([]ollamaTool, 0, len(tools))
+	for _, tool := range tools {
+		converted = append(converted, ollamaTool{
+			Type: "function",
+			Function: ollamaToolFunction{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Parameters:  tool.Parameters,
+			},
+		})
+	}
+	return converted
+}
+
+func appendToolCallParts(parts []llmhub.ContentPart, calls []ollamaToolCall) []llmhub.ContentPart {
+	for _, call := range toolCallsFromAPI(calls) {
+		parts = append(parts, call)
+	}
+	return parts
+}
+
+func toolCallsFromAPI(calls []ollamaToolCall) []*llmhub.ToolCallContent {
+	if len(calls) == 0 {
+		return nil
+	}
+	converted := make([]*llmhub.ToolCallContent, 0, len(calls))
+	for _, call := range calls {
+		args, _ := json.Marshal(call.Function.Arguments)
+		converted = append(converted, llmhub.ToolCall(call.ID, call.Function.Name, string(args)))
+	}
+	return converted
+}
+
+func parseArguments(arguments string) (map[string]interface{}, error) {
+	if strings.TrimSpace(arguments) == "" {
+		return map[string]interface{}{}, nil
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(arguments), &parsed); err != nil {
+		return nil, fmt.Errorf("ollama: tool call arguments must be a JSON object: %w", err)
+	}
+	return parsed, nil
+}
+
+func metaValue(msg *llmhub.Message, key string) string {
+	if msg == nil || msg.Meta == nil {
+		return ""
+	}
+	return msg.Meta[key]
 }
 
 func applyHeaders(r *http.Request, cfg llmhub.Config) {
@@ -247,12 +353,38 @@ type chatRequest struct {
 	Messages []ollamaMessage        `json:"messages"`
 	Stream   bool                   `json:"stream"`
 	Options  map[string]interface{} `json:"options,omitempty"`
+	Tools    []ollamaTool           `json:"tools,omitempty"`
 }
 
 type ollamaMessage struct {
-	Role     string `json:"role"`
-	Content  string `json:"content"`
-	Thinking string `json:"thinking,omitempty"`
+	Role       string           `json:"role"`
+	Content    string           `json:"content"`
+	Thinking   string           `json:"thinking,omitempty"`
+	Name       string           `json:"name,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+	ToolCalls  []ollamaToolCall `json:"tool_calls,omitempty"`
+}
+
+type ollamaTool struct {
+	Type     string             `json:"type"`
+	Function ollamaToolFunction `json:"function"`
+}
+
+type ollamaToolFunction struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	Parameters  map[string]interface{} `json:"parameters,omitempty"`
+}
+
+type ollamaToolCall struct {
+	ID       string             `json:"id,omitempty"`
+	Type     string             `json:"type,omitempty"`
+	Function ollamaFunctionCall `json:"function"`
+}
+
+type ollamaFunctionCall struct {
+	Name      string                 `json:"name,omitempty"`
+	Arguments map[string]interface{} `json:"arguments,omitempty"`
 }
 
 type chatResponse struct {

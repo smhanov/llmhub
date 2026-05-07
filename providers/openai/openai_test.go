@@ -164,6 +164,48 @@ func TestOpenAIGenerateReasoningContent(t *testing.T) {
 	}
 }
 
+func TestOpenAIGenerateToolCalls(t *testing.T) {
+	tool := llmhub.NewTool("weather", "Get weather", map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"city": map[string]interface{}{"type": "string"},
+		},
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		data, _ := io.ReadAll(r.Body)
+		var req completionRequest
+		if err := json.Unmarshal(data, &req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Tools) != 1 || req.Tools[0].Function.Name != "weather" {
+			t.Fatalf("expected weather tool, got %+v", req.Tools)
+		}
+		if len(req.Messages) != 3 || len(req.Messages[1].ToolCalls) != 1 || req.Messages[2].ToolCallID != "call-1" {
+			t.Fatalf("unexpected tool messages: %+v", req.Messages)
+		}
+		io.WriteString(w, `{"id":"chatcmpl-tool","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-2","type":"function","function":{"name":"weather","arguments":"{\"city\":\"Toronto\"}"}}]}}],"usage":{}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("test-model"), llmhub.WithBaseURL(server.URL), llmhub.WithTools(tool), llmhub.WithToolChoice(llmhub.NamedToolChoice("weather")))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("weather?")),
+		llmhub.NewAssistantMessage(llmhub.ToolCall("call-1", "weather", `{"city":"Paris"}`)),
+		llmhub.NewToolResultMessage("call-1", "weather", llmhub.Text(`{"temp":20}`)),
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	calls := resp.ToolCalls()
+	if len(calls) != 1 || calls[0].ID != "call-2" || calls[0].Name != "weather" {
+		t.Fatalf("unexpected tool calls: %+v", calls)
+	}
+}
+
 func TestOpenAIStream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -244,5 +286,30 @@ func TestOpenAIStreamStringDeltaContent(t *testing.T) {
 	chunk := <-stream
 	if chunk.Delta != "hello" {
 		t.Fatalf("unexpected delta: %+v", chunk)
+	}
+}
+
+func TestOpenAIStreamToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Toronto\\\"}\"}}]}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("m"), llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	chunk := <-stream
+	if len(chunk.ToolCalls) != 1 || chunk.ToolCalls[0].Name != "weather" {
+		t.Fatalf("unexpected tool call chunk: %+v", chunk)
 	}
 }

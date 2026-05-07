@@ -128,6 +128,8 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 		}
 
 		decoder := sse.NewDecoder(resp.Body)
+		streamToolCalls := map[int]*llmhub.ToolCallContent{}
+		streamToolArgs := map[int]*strings.Builder{}
 		for {
 			event, err := decoder.Next()
 			if err != nil {
@@ -138,11 +140,30 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				return
 			}
 			switch event.Name {
+			case "content_block_start":
+				var start anthropicContentBlockStartEvent
+				if err := json.Unmarshal([]byte(event.Data), &start); err != nil {
+					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					return
+				}
+				if start.ContentBlock.Type == "tool_use" {
+					streamToolCalls[start.Index] = llmhub.ToolCall(start.ContentBlock.ID, start.ContentBlock.Name, string(start.ContentBlock.Input))
+					streamToolArgs[start.Index] = &strings.Builder{}
+				}
 			case "content_block_delta":
 				var delta anthropicDeltaEvent
 				if err := json.Unmarshal([]byte(event.Data), &delta); err != nil {
 					ch <- llmhub.StreamChunk{Err: err, Done: true}
 					return
+				}
+				if delta.Delta.PartialJSON != "" {
+					builder := streamToolArgs[delta.Index]
+					if builder == nil {
+						builder = &strings.Builder{}
+						streamToolArgs[delta.Index] = builder
+					}
+					builder.WriteString(delta.Delta.PartialJSON)
+					continue
 				}
 				text := strings.TrimSpace(delta.Delta.Text)
 				reasoning := strings.TrimSpace(delta.Delta.Thinking)
@@ -155,7 +176,34 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 					return
 				case ch <- llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning}:
 				}
+			case "content_block_stop":
+				var stop anthropicContentBlockStopEvent
+				if err := json.Unmarshal([]byte(event.Data), &stop); err != nil {
+					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					return
+				}
+				toolCall := streamToolCalls[stop.Index]
+				if toolCall == nil {
+					continue
+				}
+				if builder := streamToolArgs[stop.Index]; builder != nil && builder.Len() > 0 {
+					toolCall.Arguments = builder.String()
+				}
+				delete(streamToolCalls, stop.Index)
+				delete(streamToolArgs, stop.Index)
+				select {
+				case <-ctx.Done():
+					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					return
+				case ch <- llmhub.StreamChunk{ToolCalls: []*llmhub.ToolCallContent{toolCall}}:
+				}
 			case "message_stop":
+				for index, toolCall := range streamToolCalls {
+					if builder := streamToolArgs[index]; builder != nil && builder.Len() > 0 {
+						toolCall.Arguments = builder.String()
+					}
+					ch <- llmhub.StreamChunk{ToolCalls: []*llmhub.ToolCallContent{toolCall}}
+				}
 				ch <- llmhub.StreamChunk{Done: true}
 				return
 			case "error":
@@ -229,6 +277,12 @@ func buildRequestPayload(prompt []*llmhub.Message, cfg llmhub.Config, stream boo
 		Temperature: cfg.Temperature,
 		Stream:      stream,
 	}
+	if len(cfg.Tools) > 0 {
+		req.Tools = convertTools(cfg.Tools)
+	}
+	if cfg.ToolChoice != nil {
+		req.ToolChoice = convertToolChoice(*cfg.ToolChoice)
+	}
 	if len(systemParts) > 0 {
 		req.System = strings.Join(systemParts, "\n\n")
 	}
@@ -248,6 +302,20 @@ func convertToAnthropicMessage(msg *llmhub.Message) (anthropicMessage, error) {
 	if msg == nil {
 		return anthropicMessage{}, fmt.Errorf("anthropic: %w: message is nil", llmhub.ErrInvalidInput)
 	}
+	if msg.Role == llmhub.RoleTool {
+		content, err := concatTextContent(msg.Content)
+		if err != nil {
+			return anthropicMessage{}, err
+		}
+		return anthropicMessage{
+			Role: "user",
+			Content: []anthropicContent{{
+				Type:      "tool_result",
+				ToolUseID: metaValue(msg, "tool_call_id"),
+				Content:   content,
+			}},
+		}, nil
+	}
 	parts := make([]anthropicContent, 0, len(msg.Content))
 	for _, part := range msg.Content {
 		switch v := part.(type) {
@@ -259,6 +327,12 @@ func convertToAnthropicMessage(msg *llmhub.Message) (anthropicMessage, error) {
 				return anthropicMessage{}, err
 			}
 			parts = append(parts, anthropicContent{Type: "image", Source: source})
+		case *llmhub.ToolCallContent:
+			input, err := toolInputRaw(v.Arguments)
+			if err != nil {
+				return anthropicMessage{}, err
+			}
+			parts = append(parts, anthropicContent{Type: "tool_use", ID: v.ID, Name: v.Name, Input: input})
 		default:
 			return anthropicMessage{}, fmt.Errorf("anthropic: unsupported content type %T", v)
 		}
@@ -334,6 +408,8 @@ func convertResponseContent(blocks []anthropicContent) ([]llmhub.ContentPart, er
 			parts = append(parts, llmhub.Text(block.Text))
 		case "thinking", "reasoning":
 			parts = append(parts, llmhub.Reasoning(firstNonEmpty(block.Thinking, block.Text)))
+		case "tool_use":
+			parts = append(parts, llmhub.ToolCall(block.ID, block.Name, string(block.Input)))
 		case "image":
 			if block.Source != nil {
 				url := block.Source.URL
@@ -347,6 +423,48 @@ func convertResponseContent(blocks []anthropicContent) ([]llmhub.ContentPart, er
 	return parts, nil
 }
 
+func convertTools(tools []llmhub.Tool) []anthropicTool {
+	converted := make([]anthropicTool, 0, len(tools))
+	for _, tool := range tools {
+		converted = append(converted, anthropicTool{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: tool.Parameters,
+		})
+	}
+	return converted
+}
+
+func convertToolChoice(choice llmhub.ToolChoice) *anthropicToolChoice {
+	switch choice.Mode {
+	case llmhub.ToolChoiceNone:
+		return &anthropicToolChoice{Type: "none"}
+	case llmhub.ToolChoiceRequired:
+		return &anthropicToolChoice{Type: "any"}
+	case llmhub.ToolChoiceNamed:
+		return &anthropicToolChoice{Type: "tool", Name: choice.Name}
+	default:
+		return &anthropicToolChoice{Type: "auto"}
+	}
+}
+
+func toolInputRaw(arguments string) (json.RawMessage, error) {
+	if strings.TrimSpace(arguments) == "" {
+		return json.RawMessage(`{}`), nil
+	}
+	if !json.Valid([]byte(arguments)) {
+		return nil, fmt.Errorf("anthropic: tool call arguments must be valid JSON")
+	}
+	return json.RawMessage(arguments), nil
+}
+
+func metaValue(msg *llmhub.Message, key string) string {
+	if msg == nil || msg.Meta == nil {
+		return ""
+	}
+	return msg.Meta[key]
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {
@@ -357,12 +475,14 @@ func firstNonEmpty(values ...string) string {
 }
 
 type anthropicRequest struct {
-	Model       string             `json:"model"`
-	Messages    []anthropicMessage `json:"messages"`
-	System      string             `json:"system,omitempty"`
-	MaxTokens   int                `json:"max_tokens"`
-	Temperature float64            `json:"temperature,omitempty"`
-	Stream      bool               `json:"stream,omitempty"`
+	Model       string               `json:"model"`
+	Messages    []anthropicMessage   `json:"messages"`
+	System      string               `json:"system,omitempty"`
+	MaxTokens   int                  `json:"max_tokens"`
+	Temperature float64              `json:"temperature,omitempty"`
+	Stream      bool                 `json:"stream,omitempty"`
+	Tools       []anthropicTool      `json:"tools,omitempty"`
+	ToolChoice  *anthropicToolChoice `json:"tool_choice,omitempty"`
 }
 
 type anthropicMessage struct {
@@ -371,10 +491,26 @@ type anthropicMessage struct {
 }
 
 type anthropicContent struct {
-	Type     string       `json:"type"`
-	Text     string       `json:"text,omitempty"`
-	Thinking string       `json:"thinking,omitempty"`
-	Source   *imageSource `json:"source,omitempty"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	Thinking  string          `json:"thinking,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	Source    *imageSource    `json:"source,omitempty"`
+}
+
+type anthropicTool struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	InputSchema map[string]interface{} `json:"input_schema,omitempty"`
+}
+
+type anthropicToolChoice struct {
+	Type string `json:"type"`
+	Name string `json:"name,omitempty"`
 }
 
 type imageSource struct {
@@ -396,10 +532,21 @@ type usageBlock struct {
 }
 
 type anthropicDeltaEvent struct {
+	Index int `json:"index"`
 	Delta struct {
-		Text     string `json:"text"`
-		Thinking string `json:"thinking"`
+		Text        string `json:"text"`
+		Thinking    string `json:"thinking"`
+		PartialJSON string `json:"partial_json"`
 	} `json:"delta"`
+}
+
+type anthropicContentBlockStartEvent struct {
+	Index        int              `json:"index"`
+	ContentBlock anthropicContent `json:"content_block"`
+}
+
+type anthropicContentBlockStopEvent struct {
+	Index int `json:"index"`
 }
 
 type anthropicErrorEvent struct {

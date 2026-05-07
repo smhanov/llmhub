@@ -65,6 +65,43 @@ func TestOllamaGenerateThinking(t *testing.T) {
 	}
 }
 
+func TestOllamaGenerateToolCalls(t *testing.T) {
+	tool := llmhub.NewTool("weather", "Get weather", map[string]interface{}{"type": "object"})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req chatRequest
+		data, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(data, &req); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(req.Tools) != 1 || req.Tools[0].Function.Name != "weather" {
+			t.Fatalf("expected weather tool, got %+v", req.Tools)
+		}
+		if len(req.Messages) != 3 || len(req.Messages[1].ToolCalls) != 1 || req.Messages[2].ToolCallID != "call-1" {
+			t.Fatalf("unexpected tool messages: %+v", req.Messages)
+		}
+		io.WriteString(w, `{"message":{"role":"assistant","tool_calls":[{"id":"call-2","type":"function","function":{"name":"weather","arguments":{"city":"Toronto"}}}]},"done":true}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("", llmhub.WithBaseURL(server.URL), llmhub.WithModel("local"), llmhub.WithTools(tool))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("weather?")),
+		llmhub.NewAssistantMessage(llmhub.ToolCall("call-1", "weather", `{"city":"Paris"}`)),
+		llmhub.NewToolResultMessage("call-1", "weather", llmhub.Text(`{"temp":20}`)),
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	calls := resp.ToolCalls()
+	if len(calls) != 1 || calls[0].ID != "call-2" || calls[0].Arguments != `{"city":"Toronto"}` {
+		t.Fatalf("unexpected tool calls: %+v", calls)
+	}
+}
+
 func TestOllamaStream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()

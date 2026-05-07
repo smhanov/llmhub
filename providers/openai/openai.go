@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	providerName      = "openai"
-	defaultBaseURL    = "https://api.openai.com/v1"
-	chatEndpointPath  = "/chat/completions"
+	providerName       = "openai"
+	defaultBaseURL     = "https://api.openai.com/v1"
+	chatEndpointPath   = "/chat/completions"
 	modelsEndpointPath = "/models"
 )
 
@@ -105,6 +105,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 		return nil, err
 	}
 	parts = appendReasoningParts(parts, decoded.Choices[0].Message.ReasoningContent, decoded.Choices[0].Message.Reasoning)
+	parts = appendToolCallParts(parts, decoded.Choices[0].Message.ToolCalls)
 	resp := &llmhub.Response{
 		ID:      decoded.ID,
 		Content: parts,
@@ -178,14 +179,15 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				return
 			}
 			reasoningDelta = firstNonEmpty(reasoningDelta, payload.Choices[0].Delta.ReasoningContent, payload.Choices[0].Delta.Reasoning)
-			if deltaText == "" && reasoningDelta == "" {
+			toolCalls := toolCallsFromAPI(payload.Choices[0].Delta.ToolCalls)
+			if deltaText == "" && reasoningDelta == "" && len(toolCalls) == 0 {
 				continue
 			}
 			select {
 			case <-ctx.Done():
 				chunks <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
 				return
-			case chunks <- llmhub.StreamChunk{Delta: deltaText, ReasoningDelta: reasoningDelta}:
+			case chunks <- llmhub.StreamChunk{Delta: deltaText, ReasoningDelta: reasoningDelta, ToolCalls: toolCalls}:
 			}
 		}
 	}()
@@ -234,6 +236,12 @@ func buildRequestPayload(prompt []*llmhub.Message, cfg llmhub.Config, stream boo
 		MaxTokens:   cfg.MaxTokens,
 		Stream:      stream,
 	}
+	if len(cfg.Tools) > 0 {
+		req.Tools = convertTools(cfg.Tools)
+	}
+	if cfg.ToolChoice != nil {
+		req.ToolChoice = convertToolChoice(*cfg.ToolChoice)
+	}
 	return json.Marshal(req)
 }
 
@@ -249,6 +257,18 @@ func convertToAPIMessage(msg *llmhub.Message) (chatMessage, error) {
 	if msg == nil {
 		return chatMessage{}, fmt.Errorf("openai: %w: message is nil", llmhub.ErrInvalidInput)
 	}
+	if msg.Role == llmhub.RoleTool {
+		content, err := flattenTextContent(msg.Content)
+		if err != nil {
+			return chatMessage{}, err
+		}
+		return chatMessage{
+			Role:       string(msg.Role),
+			Content:    content,
+			Name:       metaValue(msg, "name"),
+			ToolCallID: metaValue(msg, "tool_call_id"),
+		}, nil
+	}
 	if len(msg.Content) == 0 {
 		return chatMessage{Role: string(msg.Role), Content: ""}, nil
 	}
@@ -260,24 +280,47 @@ func convertToAPIMessage(msg *llmhub.Message) (chatMessage, error) {
 			return chatMessage{Role: string(msg.Role), Content: reasoning.Text}, nil
 		}
 	}
+	var textBuilder strings.Builder
+	var toolCalls []openAIToolCall
 	content := make([]messageContent, 0, len(msg.Content))
 	for _, part := range msg.Content {
 		switch v := part.(type) {
 		case *llmhub.TextContent:
+			textBuilder.WriteString(v.Text)
 			content = append(content, messageContent{Type: "text", Text: v.Text})
 		case *llmhub.ReasoningContent:
+			textBuilder.WriteString(v.Text)
 			content = append(content, messageContent{Type: "text", Text: v.Text})
 		case *llmhub.ImageContent:
 			content = append(content, messageContent{Type: "image_url", ImageURL: &imageURL{URL: v.URL, Detail: v.Detail}})
+		case *llmhub.ToolCallContent:
+			toolCalls = append(toolCalls, openAIToolCall{
+				ID:   v.ID,
+				Type: "function",
+				Function: openAIFunctionCall{
+					Name:      v.Name,
+					Arguments: v.Arguments,
+				},
+			})
 		default:
 			return chatMessage{}, fmt.Errorf("openai: unsupported content type %T", v)
 		}
+	}
+	if len(toolCalls) > 0 {
+		var contentValue interface{}
+		if textBuilder.Len() > 0 {
+			contentValue = textBuilder.String()
+		}
+		return chatMessage{Role: string(msg.Role), Content: contentValue, ToolCalls: toolCalls}, nil
 	}
 	return chatMessage{Role: string(msg.Role), Content: content}, nil
 }
 
 func convertFromAPIContent(raw json.RawMessage) ([]llmhub.ContentPart, error) {
 	if len(raw) == 0 {
+		return nil, nil
+	}
+	if string(raw) == "null" {
 		return nil, nil
 	}
 	if raw[0] == '"' {
@@ -310,6 +353,85 @@ func convertFromAPIContent(raw json.RawMessage) ([]llmhub.ContentPart, error) {
 		return []llmhub.ContentPart{llmhub.Text(fallback)}, nil
 	}
 	return nil, fmt.Errorf("openai: unable to decode content payload")
+}
+
+func convertTools(tools []llmhub.Tool) []openAITool {
+	converted := make([]openAITool, 0, len(tools))
+	for _, tool := range tools {
+		converted = append(converted, openAITool{
+			Type: "function",
+			Function: openAIToolFunction{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Parameters:  tool.Parameters,
+			},
+		})
+	}
+	return converted
+}
+
+func convertToolChoice(choice llmhub.ToolChoice) interface{} {
+	switch choice.Mode {
+	case llmhub.ToolChoiceNone:
+		return "none"
+	case llmhub.ToolChoiceRequired:
+		return "required"
+	case llmhub.ToolChoiceNamed:
+		return map[string]interface{}{
+			"type": "function",
+			"function": map[string]string{
+				"name": choice.Name,
+			},
+		}
+	default:
+		return "auto"
+	}
+}
+
+func appendToolCallParts(parts []llmhub.ContentPart, calls []openAIToolCall) []llmhub.ContentPart {
+	for _, call := range calls {
+		if call.Function.Name == "" {
+			continue
+		}
+		parts = append(parts, llmhub.ToolCall(call.ID, call.Function.Name, call.Function.Arguments))
+	}
+	return parts
+}
+
+func toolCallsFromAPI(calls []openAIToolCall) []*llmhub.ToolCallContent {
+	if len(calls) == 0 {
+		return nil
+	}
+	converted := make([]*llmhub.ToolCallContent, 0, len(calls))
+	for _, call := range calls {
+		if call.Function.Name == "" && call.Function.Arguments == "" {
+			continue
+		}
+		converted = append(converted, llmhub.ToolCall(call.ID, call.Function.Name, call.Function.Arguments))
+	}
+	return converted
+}
+
+func flattenTextContent(parts []llmhub.ContentPart) (string, error) {
+	var b strings.Builder
+	for _, part := range parts {
+		switch v := part.(type) {
+		case *llmhub.TextContent:
+			b.WriteString(v.Text)
+		case *llmhub.ReasoningContent:
+			b.WriteString(v.Text)
+		default:
+			return "", fmt.Errorf("openai: tool messages must be text content")
+		}
+	}
+	return b.String(), nil
+}
+
+func metaValue(msg *llmhub.Message, key string) string {
+	if msg == nil || msg.Meta == nil {
+		return ""
+	}
+	return msg.Meta[key]
 }
 
 func extractDeltaContent(raw json.RawMessage) (string, string, error) {
@@ -374,11 +496,16 @@ type completionRequest struct {
 	Temperature float64       `json:"temperature,omitempty"`
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Stream      bool          `json:"stream,omitempty"`
+	Tools       []openAITool  `json:"tools,omitempty"`
+	ToolChoice  interface{}   `json:"tool_choice,omitempty"`
 }
 
 type chatMessage struct {
-	Role    string      `json:"role"`
-	Content interface{} `json:"content"`
+	Role       string           `json:"role"`
+	Content    interface{}      `json:"content"`
+	Name       string           `json:"name,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 }
 
 type messageContent struct {
@@ -395,6 +522,28 @@ type imageURL struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+type openAITool struct {
+	Type     string             `json:"type"`
+	Function openAIToolFunction `json:"function"`
+}
+
+type openAIToolFunction struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	Parameters  map[string]interface{} `json:"parameters,omitempty"`
+}
+
+type openAIToolCall struct {
+	ID       string             `json:"id,omitempty"`
+	Type     string             `json:"type,omitempty"`
+	Function openAIFunctionCall `json:"function"`
+}
+
+type openAIFunctionCall struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
 type completionResponse struct {
 	ID      string `json:"id"`
 	Choices []struct {
@@ -404,10 +553,11 @@ type completionResponse struct {
 }
 
 type chatMessageResponse struct {
-	Role             string          `json:"role"`
-	Content          json.RawMessage `json:"content"`
-	Reasoning        string          `json:"reasoning,omitempty"`
-	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	Role             string           `json:"role"`
+	Content          json.RawMessage  `json:"content"`
+	Reasoning        string           `json:"reasoning,omitempty"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []openAIToolCall `json:"tool_calls,omitempty"`
 }
 
 type usageBlock struct {
@@ -420,9 +570,10 @@ type streamResponse struct {
 	ID      string `json:"id"`
 	Choices []struct {
 		Delta struct {
-			Content          json.RawMessage `json:"content"`
-			Reasoning        string          `json:"reasoning,omitempty"`
-			ReasoningContent string          `json:"reasoning_content,omitempty"`
+			Content          json.RawMessage  `json:"content"`
+			Reasoning        string           `json:"reasoning,omitempty"`
+			ReasoningContent string           `json:"reasoning_content,omitempty"`
+			ToolCalls        []openAIToolCall `json:"tool_calls,omitempty"`
 		} `json:"delta"`
 	} `json:"choices"`
 }

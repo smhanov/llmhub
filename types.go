@@ -54,6 +54,16 @@ func NewToolMessage(parts ...ContentPart) *Message {
 	return NewMessage(RoleTool, parts...)
 }
 
+// NewToolResultMessage returns a message containing the result for a tool call.
+func NewToolResultMessage(toolCallID, name string, parts ...ContentPart) *Message {
+	msg := NewToolMessage(parts...)
+	msg.Meta = map[string]string{
+		"tool_call_id": toolCallID,
+		"name":         name,
+	}
+	return msg
+}
+
 // TextContent represents free-form text.
 type TextContent struct {
 	Text string
@@ -87,6 +97,61 @@ func (i *ImageContent) Type() string { return "image" }
 
 // Image is a helper constructor for an image part.
 func Image(url string) *ImageContent { return &ImageContent{URL: url} }
+
+// Tool describes a callable function the model may request.
+type Tool struct {
+	Name        string
+	Description string
+	Parameters  map[string]interface{}
+}
+
+// NewTool constructs a callable tool definition.
+func NewTool(name, description string, parameters map[string]interface{}) Tool {
+	return Tool{Name: name, Description: description, Parameters: parameters}
+}
+
+// ToolChoiceMode controls how providers should use supplied tools.
+type ToolChoiceMode string
+
+const (
+	ToolChoiceAuto     ToolChoiceMode = "auto"
+	ToolChoiceNone     ToolChoiceMode = "none"
+	ToolChoiceRequired ToolChoiceMode = "required"
+	ToolChoiceNamed    ToolChoiceMode = "named"
+)
+
+// ToolChoice controls whether the model may, must, or must not call tools.
+type ToolChoice struct {
+	Mode ToolChoiceMode
+	Name string
+}
+
+// AutoToolChoice lets the model choose whether to call tools.
+func AutoToolChoice() ToolChoice { return ToolChoice{Mode: ToolChoiceAuto} }
+
+// NoToolChoice prevents the model from calling tools.
+func NoToolChoice() ToolChoice { return ToolChoice{Mode: ToolChoiceNone} }
+
+// RequiredToolChoice requires the model to call at least one tool.
+func RequiredToolChoice() ToolChoice { return ToolChoice{Mode: ToolChoiceRequired} }
+
+// NamedToolChoice requires the model to call the named tool.
+func NamedToolChoice(name string) ToolChoice { return ToolChoice{Mode: ToolChoiceNamed, Name: name} }
+
+// ToolCallContent represents a model-requested call to a tool.
+type ToolCallContent struct {
+	ID        string
+	Name      string
+	Arguments string
+}
+
+// Type identifies the piece as a tool call.
+func (t *ToolCallContent) Type() string { return "tool_call" }
+
+// ToolCall is a helper constructor for a tool-call content part.
+func ToolCall(id, name, arguments string) *ToolCallContent {
+	return &ToolCallContent{ID: id, Name: name, Arguments: arguments}
+}
 
 // UsageMetadata captures token consumption and cost information reported by providers.
 type UsageMetadata struct {
@@ -132,10 +197,25 @@ func (r *Response) ReasoningText() string {
 	return b.String()
 }
 
+// ToolCalls returns all normalized tool calls requested in the response.
+func (r *Response) ToolCalls() []*ToolCallContent {
+	if r == nil {
+		return nil
+	}
+	var calls []*ToolCallContent
+	for _, part := range r.Content {
+		if call, ok := part.(*ToolCallContent); ok {
+			calls = append(calls, call)
+		}
+	}
+	return calls
+}
+
 // StreamChunk represents a partial streaming response.
 type StreamChunk struct {
 	Delta          string
 	ReasoningDelta string
+	ToolCalls      []*ToolCallContent
 	Done           bool
 	Err            error
 }
