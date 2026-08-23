@@ -23,12 +23,14 @@ import (
 	_ "github.com/smhanov/llmhub/providers/gemini"
 	_ "github.com/smhanov/llmhub/providers/ollama"
 	_ "github.com/smhanov/llmhub/providers/openai"
+	"github.com/smhanov/llmhub/providers/xai"
 )
 
 func main() {
-	provider := flag.String("provider", "", "Provider name: openai, anthropic, gemini, ollama")
+	provider := flag.String("provider", "", "Provider name: openai, anthropic, gemini, ollama, xai")
 	model := flag.String("model", "", "Model identifier")
-	apiKey := flag.String("api-key", "", "API key (or use env var OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)")
+	apiKey := flag.String("api-key", "", "API key (or use env var OPENAI_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY, etc.)")
+	authFile := flag.String("auth-file", "", "Path to token file for OAuth-based providers (e.g. xAI)")
 	baseURL := flag.String("base-url", "", "Override base URL for the provider")
 	prompt := flag.String("prompt", "", "Text prompt to send")
 	promptFile := flag.String("prompt-file", "", "File containing the prompt text")
@@ -74,6 +76,8 @@ func main() {
 			key = os.Getenv("ANTHROPIC_API_KEY")
 		case "gemini":
 			key = os.Getenv("GEMINI_API_KEY")
+		case "xai":
+			key = os.Getenv("XAI_API_KEY")
 		}
 	}
 
@@ -93,6 +97,11 @@ func main() {
 	}
 	if *inputCost > 0 || *outputCost > 0 {
 		opts = append(opts, llmhub.WithCost(*inputCost, *outputCost))
+	}
+	if *authFile != "" && *provider == "xai" {
+		store := xai.NewFileTokenStore(*authFile)
+		source := xai.NewTokenSource(store)
+		opts = append(opts, llmhub.WithTokenSource(source))
 	}
 	opts = append(opts, llmhub.WithHTTPClient(&http.Client{Timeout: *timeout}))
 

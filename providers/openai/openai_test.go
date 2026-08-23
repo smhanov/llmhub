@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/smhanov/llmhub"
 )
@@ -312,4 +314,118 @@ func TestOpenAIStreamToolCalls(t *testing.T) {
 	if len(chunk.ToolCalls) != 1 || chunk.ToolCalls[0].Name != "weather" {
 		t.Fatalf("unexpected tool call chunk: %+v", chunk)
 	}
+}
+
+func TestOpenAICustomHeaders(t *testing.T) {
+	var gotAuth, gotCustom string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotCustom = r.Header.Get("X-Custom-Header")
+		io.WriteString(w, `{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("testkey",
+		llmhub.WithBaseURL(server.URL),
+		llmhub.WithHeader("X-Custom-Header", "my-value"),
+	)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	_, err = provider.Generate(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if gotAuth != "Bearer testkey" {
+		t.Fatalf("expected auth 'Bearer testkey', got %q", gotAuth)
+	}
+	if gotCustom != "my-value" {
+		t.Fatalf("expected custom header 'my-value', got %q", gotCustom)
+	}
+}
+
+func TestOpenAIHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, `{"error":{"message":"invalid api key"}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("badkey", llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	_, err = provider.Generate(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err == nil {
+		t.Fatal("expected error on 401")
+	}
+	if !strings.Contains(err.Error(), "http 401") || !strings.Contains(err.Error(), "invalid api key") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream init error: %v", err)
+	}
+	chunk := <-stream
+	if chunk.Err == nil || !strings.Contains(chunk.Err.Error(), "http 401") {
+		t.Fatalf("expected stream chunk error with 401, got: %+v", chunk)
+	}
+}
+
+func TestOpenAIContextCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		io.WriteString(w, `{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("testkey", llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = provider.Generate(ctx, []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err == nil {
+		t.Fatal("expected error on canceled context")
+	}
+}
+
+func TestOpenAICustomHTTPClient(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`)
+	}))
+	defer server.Close()
+
+	customTransport := &testRoundTripper{
+		roundTrip: func(req *http.Request) (*http.Response, error) {
+			called = true
+			return http.DefaultTransport.RoundTrip(req)
+		},
+	}
+	customClient := &http.Client{Transport: customTransport}
+
+	provider, err := New("testkey", llmhub.WithBaseURL(server.URL), llmhub.WithHTTPClient(customClient))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	_, err = provider.Generate(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if !called {
+		t.Fatal("custom HTTP client was not called")
+	}
+}
+
+type testRoundTripper struct {
+	roundTrip func(req *http.Request) (*http.Response, error)
+}
+
+func (t *testRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.roundTrip(req)
 }

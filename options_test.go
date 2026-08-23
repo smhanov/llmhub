@@ -1,6 +1,11 @@
 package llmhub
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/smhanov/llmhub/auth"
+)
 
 func TestNewConfigDefaults(t *testing.T) {
 	cfg := NewConfig()
@@ -56,5 +61,32 @@ func TestToolOptionsClone(t *testing.T) {
 	clone.Tools[0].Parameters["type"] = "changed"
 	if cfg.Tools[0].Parameters["type"] != "object" {
 		t.Fatalf("config clone should isolate tool schemas")
+	}
+}
+
+type staticTokenSource struct {
+	token *auth.Token
+}
+
+func (s *staticTokenSource) Token(context.Context) (*auth.Token, error) {
+	return s.token, nil
+}
+
+func TestTokenSourceOption(t *testing.T) {
+	src := &staticTokenSource{token: &auth.Token{AccessToken: "abc"}}
+	cfg := NewConfig(
+		WithTokenSource(src),
+		WithAPIKey("api-key"),
+	)
+	if cfg.TokenSource != src {
+		t.Fatalf("expected TokenSource to be set")
+	}
+	if cfg.APIKey != "api-key" {
+		t.Fatalf("expected APIKey to be preserved")
+	}
+
+	clone := cfg.Clone()
+	if clone.TokenSource != src {
+		t.Fatalf("expected cloned TokenSource to be preserved")
 	}
 }

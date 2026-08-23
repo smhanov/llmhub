@@ -152,6 +152,7 @@ Tool choice helpers include `AutoToolChoice`, `NoToolChoice`, `RequiredToolChoic
 | Anthropic | ✅ Messages API tools |
 | Gemini    | ✅ Function declarations |
 | Ollama    | ✅ Native `/api/chat` tools |
+| xAI       | ✅ Chat Completions tools |
 
 ## Provider Registry
 
@@ -175,6 +176,7 @@ At runtime, consumers simply call `llmhub.New("my-llm", "token")`.
 | Anthropic | ✅ Production | Claude 3 Messages API with streaming deltas.             |
 | Gemini    | ✅ Production | Gemini 1.5 multi-modal text+vision APIs, streaming JSON. |
 | Ollama    | ✅ Production | Local inference via `/api/chat`, streaming friendly.     |
+| xAI       | ✅ Production | Grok models, API key or OAuth device flow, SSE streaming.|
 
 ### OpenAI Provider Details
 
@@ -197,6 +199,32 @@ client, err := llmhub.New("openai", "key",
 // The provider will query http://localhost:11434/v1/models and use the first model.
 ```
 
+### xAI (Grok) Provider Details
+
+Import `providers/xai` to register the `xai` provider. It uses the
+OpenAI-compatible Chat Completions API, supports streaming and tool calling,
+and defaults to `grok-4.6`. Override the model when your account has access to
+a different Grok model.
+
+For xAI API keys, use it exactly like any other API-key provider—OAuth setup is
+not involved:
+
+```go
+import (
+    "github.com/smhanov/llmhub"
+    _ "github.com/smhanov/llmhub/providers/xai"
+)
+
+// Using an API key:
+client, err := llmhub.New("xai", apiKey,
+    llmhub.WithModel("grok-4.6"),
+)
+
+if err != nil {
+    panic(err)
+}
+```
+
 To reduce binary size, providers self-register when imported, enabling tree-shaking when unused.
 
 ```go
@@ -205,12 +233,14 @@ import (
     _ "github.com/smhanov/llmhub/providers/anthropic"
     _ "github.com/smhanov/llmhub/providers/gemini"
     _ "github.com/smhanov/llmhub/providers/ollama"
+    _ "github.com/smhanov/llmhub/providers/xai"
 )
 ```
 
 Each provider reads the shared functional options:
 
-- `WithAPIKey` – supply SaaS credentials (`openai`, `anthropic`, `gemini`).
+- `WithAPIKey` – supply SaaS credentials (`openai`, `anthropic`, `gemini`, `xai`).
+- `WithTokenSource` – supply an OAuth / dynamic token source (`xai`).
 - `WithBaseURL` – point to proxies/self-hosted gateways.
 - `WithModel`, `WithTemperature` – customize LLM behavior per call. Often it is best to omit and go with the defaults.
 - `WithMaxTokens` – only set this when you truly need a hard output cap; otherwise leave it unset to reduce the risk of truncated responses.
@@ -329,6 +359,122 @@ fmt.Println(resp.Text())
 | OpenAI    | ❌ Not supported             |
 | Anthropic | ❌ Not supported             |
 | Ollama    | ❌ Not supported             |
+| xAI       | ❌ Not supported             |
+
+## OAuth Token Sources
+
+OAuth is opt-in and provider-dependent. It is not required by existing
+API-key providers. Currently, `xai` is the built-in provider that accepts
+`WithTokenSource`; future OAuth providers can reuse the generic `auth` and
+`auth/oauth2` packages.
+
+OAuth login is always explicit and application-controlled: `llmhub.New`,
+`Generate`, and `Stream` will never open a browser or wait for a user to sign
+in.
+
+### Using an Existing Token File
+
+```go
+import (
+    "github.com/smhanov/llmhub"
+    "github.com/smhanov/llmhub/providers/xai"
+)
+
+// Discover an existing ~/.grok/auth.json, ~/.xgroxy/auth.json, or XAI_AUTH_FILE.
+authPath := xai.DefaultAuthPath("")
+store := xai.NewFileTokenStore(authPath)
+source := xai.NewTokenSource(store)
+
+client, err := llmhub.New("xai", "",
+    llmhub.WithTokenSource(source),
+    llmhub.WithModel("grok-4.6"),
+)
+if err != nil {
+    panic(err)
+}
+```
+
+`WithTokenSource` takes precedence over the positional `apiKey` argument and
+`WithAPIKey`. If neither one is supplied to `xai`, construction fails with
+`llmhub.ErrInvalidInput`.
+
+### Performing an Interactive Device Login
+
+Login is an explicit, application-controlled operation that never blocks inside library constructors:
+
+```go
+import (
+    "context"
+    "fmt"
+
+    "github.com/smhanov/llmhub/providers/xai"
+)
+
+func login(ctx context.Context) error {
+    store := xai.NewFileTokenStore(xai.DefaultAuthPath(""))
+    flow := xai.NewDeviceFlow()
+
+    authz, err := flow.Start(ctx)
+    if err != nil {
+        return err
+    }
+
+    fmt.Printf("Please visit: %s\n", authz.VerificationURI)
+    if authz.VerificationURIComplete != "" {
+        fmt.Printf("Or open: %s\n", authz.VerificationURIComplete)
+    }
+    fmt.Printf("And enter code: %s\n", authz.UserCode)
+
+    token, err := flow.Wait(ctx, authz)
+    if err != nil {
+        return err
+    }
+
+    return store.Save(ctx, token)
+}
+```
+
+### Credential Precedence & Error Handling
+
+- **Precedence:** `WithTokenSource` takes precedence over `WithAPIKey` and the positional `apiKey` argument.
+- **Refresh:** `xai.NewTokenSource` refreshes access tokens before they expire and performs one refresh/retry after an API 401 response. It safely handles rotating refresh tokens within one process.
+- **Reauthentication:** If a refresh token is expired or revoked, provider calls return an error wrapping `auth.ErrReauthenticationRequired`. Use `errors.Is` to prompt for a new interactive login:
+
+  ```go
+  if errors.Is(err, auth.ErrReauthenticationRequired) {
+      // Start the device flow again and save the new token.
+  }
+  ```
+
+- **Security:** New token directories/files are created with private `0700`/`0600` permissions on Unix. Do not print, commit, or pass access/refresh tokens as command-line arguments.
+
+## xAI OAuth acceptance example
+
+`examples/xai-oauth` is a real end-to-end example. It performs an explicit
+device login when needed, can force a token refresh, then verifies both a
+non-streaming and a streaming Grok response. It requires an authorized xAI
+account and intentionally is not part of the offline test suite.
+
+```bash
+go run ./examples/xai-oauth \
+  -auth-file /private/path/auth.json \
+  -force-login \
+  -verify-refresh \
+  -model grok-4.6
+```
+
+The command prints a verification URL and one-time code, waits for you to
+authorize it in a browser, and succeeds only after it prints:
+
+```text
+refresh: OK
+generate: OK
+stream: OK
+xai oauth acceptance: PASS
+```
+
+Use a dedicated private auth-file path for this check. The example never
+prints access or refresh tokens.
 
 Need multi-provider routing? Instantiate one `llmhub.Client` per provider and switch at runtime:
 
@@ -362,21 +508,22 @@ go run ./examples/cli [options]
 
 ### Options
 
-| Flag           | Description                                                                       |
-| -------------- | --------------------------------------------------------------------------------- |
-| `-provider`    | Provider name: `openai`, `anthropic`, `gemini`, `ollama` (required)               |
-| `-model`       | Model identifier (e.g., `gpt-4o`, `claude-3-haiku-20240307`, `gemini-2.5-flash`)  |
-| `-api-key`     | API key (or use env vars `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) |
-| `-base-url`    | Override provider base URL (useful for Ollama or proxies)                         |
-| `-prompt`      | Text prompt to send                                                               |
-| `-prompt-file` | File containing the prompt text                                                   |
-| `-images`      | Comma-separated list of image file paths or URLs                                  |
-| `-stream`      | Enable streaming mode                                                             |
-| `-temperature` | Sampling temperature (default: 0.7)                                               |
-| `-max-tokens`  | Hard cap on generated tokens; leave unset unless needed to avoid truncation       |
-| `-input-cost`  | Cost per 1M input tokens in USD (for cost accounting)                             |
-| `-output-cost` | Cost per 1M output tokens in USD (for cost accounting)                            |
-| `-timeout`     | Request timeout duration (e.g. `30s`, `2m`, `10m`)                                 |
+| Flag           | Description                                                                                 |
+| -------------- | ------------------------------------------------------------------------------------------- |
+| `-provider`    | Provider name: `openai`, `anthropic`, `gemini`, `ollama`, `xai` (required)                 |
+| `-model`       | Model identifier (e.g., `gpt-4o`, `claude-3-haiku-20240307`, `gemini-2.5-flash`, `grok-4.6`)|
+| `-api-key`     | API key (or use env vars `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`)|
+| `-auth-file`   | Path to token file for OAuth providers (e.g. xAI)                                           |
+| `-base-url`    | Override provider base URL (useful for Ollama or proxies)                                   |
+| `-prompt`      | Text prompt to send                                                                         |
+| `-prompt-file` | File containing the prompt text                                                             |
+| `-images`      | Comma-separated list of image file paths or URLs                                            |
+| `-stream`      | Enable streaming mode                                                                       |
+| `-temperature` | Sampling temperature (default: 0.7)                                                         |
+| `-max-tokens`  | Hard cap on generated tokens; leave unset unless needed to avoid truncation                 |
+| `-input-cost`  | Cost per 1M input tokens in USD (for cost accounting)                                       |
+| `-output-cost` | Cost per 1M output tokens in USD (for cost accounting)                                      |
+| `-timeout`     | Request timeout duration (e.g. `30s`, `2m`, `10m`)                                           |
 
 ### Examples
 
@@ -427,6 +574,16 @@ go run ./examples/cli \
 ```bash
 export OPENAI_API_KEY=sk-...
 go run ./examples/cli -provider openai -model gpt-4o -prompt "Hello!"
+```
+
+**Using an existing xAI OAuth token file:**
+
+```bash
+go run ./examples/cli \
+  -provider xai \
+  -auth-file ~/.grok/auth.json \
+  -model grok-4.6 \
+  -prompt "Reply with exactly: OK"
 ```
 
 **With cost accounting:**

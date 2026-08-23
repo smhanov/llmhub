@@ -1,6 +1,10 @@
 package llmhub
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/smhanov/llmhub/auth"
+)
 
 // Config captures all tunable request options shared across providers.
 type Config struct {
@@ -11,6 +15,7 @@ type Config struct {
 	// that are too low can cause the model to return truncated output.
 	MaxTokens       int
 	APIKey          string
+	TokenSource     auth.TokenSource
 	BaseURL         string
 	HTTPClient      *http.Client
 	Headers         map[string]string
@@ -110,6 +115,15 @@ func WithMaxTokens(max int) Option {
 func WithAPIKey(key string) Option {
 	return func(c *Config) {
 		c.APIKey = key
+	}
+}
+
+// WithTokenSource configures an abstract token source for providers that support OAuth or dynamic token acquisition.
+//
+// For providers supporting both API keys and OAuth (e.g. xAI), a non-nil TokenSource takes precedence over APIKey.
+func WithTokenSource(source auth.TokenSource) Option {
+	return func(c *Config) {
+		c.TokenSource = source
 	}
 }
 
