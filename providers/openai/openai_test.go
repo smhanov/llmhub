@@ -144,6 +144,27 @@ func TestOpenAIGenerate(t *testing.T) {
 	}
 }
 
+func TestOpenAIGenerateWithCost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12,"cost":0.00015}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("test-model"), llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if resp.Usage.Cost != 0.00015 {
+		t.Fatalf("expected cost 0.00015, got %v", resp.Usage.Cost)
+	}
+}
+
 func TestOpenAIGenerateReasoningContent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":[{"type":"text","text":"answer"},{"type":"reasoning","reasoning":"thought-a"}],"reasoning_content":"thought-b"}}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}`)

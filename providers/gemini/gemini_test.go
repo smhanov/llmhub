@@ -43,6 +43,25 @@ func TestGeminiGenerate(t *testing.T) {
 	}
 }
 
+func TestGeminiGenerateWithCost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"pong"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3,"cost":0.0003}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("secret", llmhub.WithBaseURL(server.URL), llmhub.WithModel("flash-test"))
+	if err != nil {
+		t.Fatalf("provider new: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("ping"))})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if resp.Usage.Cost != 0.0003 {
+		t.Fatalf("expected cost 0.0003, got %v", resp.Usage.Cost)
+	}
+}
+
 func TestGeminiGenerateReasoning(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"scratch","thought":true},{"text":"answer"}]}}],"usage_metadata":{"prompt_token_count":1,"candidates_token_count":2,"total_token_count":3}}`)

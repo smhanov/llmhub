@@ -88,6 +88,13 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	parts = AppendReasoningParts(parts, decoded.Choices[0].Message.ReasoningContent, decoded.Choices[0].Message.Reasoning)
 	parts = appendToolCallParts(parts, decoded.Choices[0].Message.ToolCalls)
 
+	var cost float64
+	if decoded.Usage.Cost != nil {
+		cost = *decoded.Usage.Cost
+	} else if decoded.Usage.TotalCost != nil {
+		cost = *decoded.Usage.TotalCost
+	}
+
 	resp := &llmhub.Response{
 		ID:      decoded.ID,
 		Content: parts,
@@ -95,6 +102,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 			PromptTokens:     decoded.Usage.PromptTokens,
 			CompletionTokens: decoded.Usage.CompletionTokens,
 			TotalTokens:      decoded.Usage.TotalTokens,
+			Cost:             cost,
 		},
 		Raw: decoded,
 	}
@@ -676,9 +684,11 @@ type chatMessageResponse struct {
 }
 
 type usageBlock struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens     int      `json:"prompt_tokens"`
+	CompletionTokens int      `json:"completion_tokens"`
+	TotalTokens      int      `json:"total_tokens"`
+	Cost             *float64 `json:"cost,omitempty"`
+	TotalCost        *float64 `json:"total_cost,omitempty"`
 }
 
 type streamResponse struct {

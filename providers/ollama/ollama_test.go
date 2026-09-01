@@ -43,6 +43,25 @@ func TestOllamaGenerate(t *testing.T) {
 	}
 }
 
+func TestOllamaGenerateWithCost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"message":{"role":"assistant","content":"pong"},"prompt_eval_count":1,"eval_count":2,"cost":0.00005,"done":true}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("", llmhub.WithBaseURL(server.URL), llmhub.WithModel("local"))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("ping"))})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if resp.Usage.Cost != 0.00005 {
+		t.Fatalf("expected cost 0.00005, got %v", resp.Usage.Cost)
+	}
+}
+
 func TestOllamaGenerateThinking(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"message":{"role":"assistant","content":"final","thinking":"plan"},"prompt_eval_count":1,"eval_count":2,"done":true}`)

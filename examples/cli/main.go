@@ -6,6 +6,7 @@
 //	go run ./examples/cli -provider ollama -model llama3 -base-url http://localhost:11434 -prompt "Why is the sky blue?"
 //	go run ./examples/cli -provider gemini -model gemini-2.5-flash -api-key YOUR_KEY -prompt-file prompt.txt
 //	go run ./examples/cli -provider openai -model gpt-4o -prompt "What is in this image?" -image photo.png
+//	go run ./examples/cli -provider openrouter -model x-ai/grok-4.5 -api-key YOUR_KEY -prompt "Hello!"
 package main
 
 import (
@@ -23,11 +24,12 @@ import (
 	_ "github.com/smhanov/llmhub/providers/gemini"
 	_ "github.com/smhanov/llmhub/providers/ollama"
 	_ "github.com/smhanov/llmhub/providers/openai"
+	_ "github.com/smhanov/llmhub/providers/openrouter"
 	"github.com/smhanov/llmhub/providers/xai"
 )
 
 func main() {
-	provider := flag.String("provider", "", "Provider name: openai, anthropic, gemini, ollama, xai")
+	provider := flag.String("provider", "", "Provider name: openai, anthropic, gemini, ollama, xai, openrouter")
 	model := flag.String("model", "", "Model identifier")
 	apiKey := flag.String("api-key", "", "API key (or use env var OPENAI_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY, etc.)")
 	authFile := flag.String("auth-file", "", "Path to token file for OAuth-based providers (e.g. xAI)")
@@ -78,6 +80,8 @@ func main() {
 			key = os.Getenv("GEMINI_API_KEY")
 		case "xai":
 			key = os.Getenv("XAI_API_KEY")
+		case "openrouter":
+			key = os.Getenv("OPENROUTER_API_KEY")
 		}
 	}
 

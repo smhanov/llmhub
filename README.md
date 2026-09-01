@@ -1,6 +1,6 @@
 # llmhub
 
-Unified, provider-agnostic Go client for modern Large Language Models (LLMs). llmhub wraps multiple vendors (OpenAI, Anthropic, Gemini, Ollama, and your own) behind a single, expressive API that understands multi-modal messages, streaming, and provider registries.
+Unified, provider-agnostic Go client for modern Large Language Models (LLMs). llmhub wraps multiple vendors (OpenAI, Anthropic, Gemini, Ollama, OpenRouter, and your own) behind a single, expressive API that understands multi-modal messages, streaming, and provider registries.
 
 ## Why llmhub?
 
@@ -153,6 +153,7 @@ Tool choice helpers include `AutoToolChoice`, `NoToolChoice`, `RequiredToolChoic
 | Gemini    | ✅ Function declarations |
 | Ollama    | ✅ Native `/api/chat` tools |
 | xAI       | ✅ Chat Completions tools |
+| OpenRouter| ✅ Chat Completions tools |
 
 ## Provider Registry
 
@@ -177,6 +178,7 @@ At runtime, consumers simply call `llmhub.New("my-llm", "token")`.
 | Gemini    | ✅ Production | Gemini 1.5 multi-modal text+vision APIs, streaming JSON. |
 | Ollama    | ✅ Production | Local inference via `/api/chat`, streaming friendly.     |
 | xAI       | ✅ Production | Grok models, API key or OAuth device flow, SSE streaming.|
+| OpenRouter| ✅ Production | OpenAI-compatible gateway to many vendors, returns per-request cost. |
 
 ### OpenAI Provider Details
 
@@ -225,6 +227,29 @@ if err != nil {
 }
 ```
 
+### OpenRouter Provider Details
+
+Import `providers/openrouter` to register the `openrouter` provider. It uses
+OpenRouter's OpenAI-compatible Chat Completions API (`https://openrouter.ai/api/v1`),
+supports streaming and tool calling, and can route to any model available on
+OpenRouter using its `vendor/model` identifiers (e.g. `x-ai/grok-4.5`,
+`openai/gpt-4o-mini`):
+
+```go
+import (
+    "github.com/smhanov/llmhub"
+    _ "github.com/smhanov/llmhub/providers/openrouter"
+)
+
+client, err := llmhub.New("openrouter", apiKey,
+    llmhub.WithModel("x-ai/grok-4.5"),
+)
+```
+
+OpenRouter returns the actual per-request cost in every response
+(`usage.cost`), so `Response.Usage.Cost` is always the exact amount charged—
+no `WithCost` rates are needed for OpenRouter.
+
 To reduce binary size, providers self-register when imported, enabling tree-shaking when unused.
 
 ```go
@@ -233,13 +258,14 @@ import (
     _ "github.com/smhanov/llmhub/providers/anthropic"
     _ "github.com/smhanov/llmhub/providers/gemini"
     _ "github.com/smhanov/llmhub/providers/ollama"
+    _ "github.com/smhanov/llmhub/providers/openrouter"
     _ "github.com/smhanov/llmhub/providers/xai"
 )
 ```
 
 Each provider reads the shared functional options:
 
-- `WithAPIKey` – supply SaaS credentials (`openai`, `anthropic`, `gemini`, `xai`).
+- `WithAPIKey` – supply SaaS credentials (`openai`, `anthropic`, `gemini`, `xai`, `openrouter`).
 - `WithTokenSource` – supply an OAuth / dynamic token source (`xai`).
 - `WithBaseURL` – point to proxies/self-hosted gateways.
 - `WithModel`, `WithTemperature` – customize LLM behavior per call. Often it is best to omit and go with the defaults.
@@ -298,6 +324,7 @@ llmhub.WithResponseModalities("TEXT", "IMAGE")
 | OpenAI    | ❌ Use the Images API directly                |
 | Anthropic | ❌ Not supported                              |
 | Ollama    | ❌ Not supported                              |
+| OpenRouter| ❌ Not supported                              |
 
 ## Cost Accounting
 
@@ -324,7 +351,7 @@ $$
 + \frac{\text{CompletionTokens} \times \text{OutputRate}}{1{,}000{,}000}
 $$
 
-If no cost rates are configured, `Usage.Cost` will be zero.
+If the LLM provider returns cost directly in its API response (e.g., OpenRouter's `usage.cost`), that cost takes precedence and overrides any rates configured via `WithCost`. This also applies to OpenAI-compatible gateways and self-hosted servers that report `cost` or `total_cost` in the usage block. When no provider cost is returned and no cost rates are configured, `Usage.Cost` will be zero.
 
 You can also override cost rates on a per-request basis:
 
@@ -360,6 +387,7 @@ fmt.Println(resp.Text())
 | Anthropic | ❌ Not supported             |
 | Ollama    | ❌ Not supported             |
 | xAI       | ❌ Not supported             |
+| OpenRouter| ❌ Not supported             |
 
 ## OAuth Token Sources
 
@@ -510,9 +538,9 @@ go run ./examples/cli [options]
 
 | Flag           | Description                                                                                 |
 | -------------- | ------------------------------------------------------------------------------------------- |
-| `-provider`    | Provider name: `openai`, `anthropic`, `gemini`, `ollama`, `xai` (required)                 |
-| `-model`       | Model identifier (e.g., `gpt-4o`, `claude-3-haiku-20240307`, `gemini-2.5-flash`, `grok-4.6`)|
-| `-api-key`     | API key (or use env vars `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`)|
+| `-provider`    | Provider name: `openai`, `anthropic`, `gemini`, `ollama`, `xai`, `openrouter` (required)   |
+| `-model`       | Model identifier (e.g., `gpt-4o`, `claude-3-haiku-20240307`, `gemini-2.5-flash`, `grok-4.6`, `x-ai/grok-4.5`)|
+| `-api-key`     | API key (or use env vars `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `OPENROUTER_API_KEY`)|
 | `-auth-file`   | Path to token file for OAuth providers (e.g. xAI)                                           |
 | `-base-url`    | Override provider base URL (useful for Ollama or proxies)                                   |
 | `-prompt`      | Text prompt to send                                                                         |
@@ -567,6 +595,17 @@ go run ./examples/cli \
   -api-key YOUR_OPENAI_KEY \
   -prompt "Write a haiku about coding." \
   -stream
+```
+
+**OpenRouter with provider-reported cost:**
+
+```bash
+go run ./examples/cli \
+  -provider openrouter \
+  -model x-ai/grok-4.5 \
+  -api-key YOUR_OPENROUTER_KEY \
+  -prompt "Reply with exactly: OK"
+# Tokens and the exact Cost charged by OpenRouter are printed automatically.
 ```
 
 **Using environment variables:**

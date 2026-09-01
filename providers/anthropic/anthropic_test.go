@@ -46,6 +46,27 @@ func TestAnthropicGenerate(t *testing.T) {
 	}
 }
 
+func TestAnthropicGenerateWithCost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"id":"msg","content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":5,"output_tokens":7,"cost":0.0002}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("claude-test"), llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if resp.Usage.Cost != 0.0002 {
+		t.Fatalf("expected cost 0.0002, got %v", resp.Usage.Cost)
+	}
+}
+
 func TestAnthropicGenerateReasoning(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"id":"msg","content":[{"type":"thinking","thinking":"hidden steps"},{"type":"text","text":"final"}],"usage":{"input_tokens":5,"output_tokens":7}}`)

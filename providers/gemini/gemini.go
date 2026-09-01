@@ -94,12 +94,19 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 		return nil, err
 	}
 	usage := decoded.Usage
+	var cost float64
+	if usage.Cost != nil {
+		cost = *usage.Cost
+	} else if usage.TotalCost != nil {
+		cost = *usage.TotalCost
+	}
 	return &llmhub.Response{
 		Content: parts,
 		Usage: llmhub.UsageMetadata{
 			PromptTokens:     usage.PromptTokenCount,
 			CompletionTokens: usage.CandidatesTokenCount,
 			TotalTokens:      usage.TotalTokenCount,
+			Cost:             cost,
 		},
 		Raw: decoded,
 	}, nil
@@ -566,7 +573,9 @@ type candidate struct {
 }
 
 type usageMetadata struct {
-	PromptTokenCount     int `json:"promptTokenCount"`
-	CandidatesTokenCount int `json:"candidatesTokenCount"`
-	TotalTokenCount      int `json:"totalTokenCount"`
+	PromptTokenCount     int      `json:"promptTokenCount"`
+	CandidatesTokenCount int      `json:"candidatesTokenCount"`
+	TotalTokenCount      int      `json:"totalTokenCount"`
+	Cost                 *float64 `json:"cost,omitempty"`
+	TotalCost            *float64 `json:"totalCost,omitempty"`
 }

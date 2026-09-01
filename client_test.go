@@ -84,6 +84,43 @@ func TestClientGenerateCostZeroWhenNotConfigured(t *testing.T) {
 	}
 }
 
+func TestClientGenerateProviderCostOverridesConfiguredRates(t *testing.T) {
+	stub := &testProvider{
+		generateFn: func(ctx context.Context, prompt []*Message, opts ...Option) (*Response, error) {
+			return &Response{
+				ID:      "provider-cost",
+				Content: []ContentPart{Text("ok")},
+				Usage: UsageMetadata{
+					PromptTokens:     1000,
+					CompletionTokens: 500,
+					TotalTokens:      1500,
+					Cost:             0.000123, // Provider-reported cost
+				},
+			}, nil
+		},
+	}
+	// Configured rates would compute (1000 * 2.50 + 500 * 10.00) / 1M = 0.0075
+	// But provider returned 0.000123, which must be preserved and override the configured rates.
+	client := Wrap(stub, WithCost(2.50, 10.00))
+	resp, err := client.Generate(context.Background(), []*Message{NewUserMessage(Text("hi"))})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	expected := 0.000123
+	if math.Abs(resp.Usage.Cost-expected) > 1e-9 {
+		t.Fatalf("expected provider cost %f to override configured rates, got %f", expected, resp.Usage.Cost)
+	}
+
+	// Also verify per-request WithCost does not override provider-reported cost
+	resp, err = client.Generate(context.Background(), []*Message{NewUserMessage(Text("hi"))}, WithCost(50.0, 100.0))
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if math.Abs(resp.Usage.Cost-expected) > 1e-9 {
+		t.Fatalf("expected provider cost %f to override per-request rates, got %f", expected, resp.Usage.Cost)
+	}
+}
+
 func TestClientGenerateCostPerRequestOverride(t *testing.T) {
 	stub := &testProvider{
 		generateFn: func(ctx context.Context, prompt []*Message, opts ...Option) (*Response, error) {

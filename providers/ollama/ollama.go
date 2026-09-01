@@ -85,12 +85,19 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	}
 	parts = append(parts, llmhub.Text(text))
 	parts = appendToolCallParts(parts, decoded.Message.ToolCalls)
+	var cost float64
+	if decoded.Cost != nil {
+		cost = *decoded.Cost
+	} else if decoded.TotalCost != nil {
+		cost = *decoded.TotalCost
+	}
 	return &llmhub.Response{
 		Content: parts,
 		Usage: llmhub.UsageMetadata{
 			PromptTokens:     decoded.PromptEvalCount,
 			CompletionTokens: decoded.EvalCount,
 			TotalTokens:      decoded.PromptEvalCount + decoded.EvalCount,
+			Cost:             cost,
 		},
 		Raw: decoded,
 	}, nil
@@ -394,4 +401,6 @@ type chatResponse struct {
 	Error           string        `json:"error"`
 	PromptEvalCount int           `json:"prompt_eval_count"`
 	EvalCount       int           `json:"eval_count"`
+	Cost            *float64      `json:"cost,omitempty"`
+	TotalCost       *float64      `json:"total_cost,omitempty"`
 }

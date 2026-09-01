@@ -87,6 +87,13 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	if err != nil {
 		return nil, err
 	}
+	var cost float64
+	if decoded.Usage.Cost != nil {
+		cost = *decoded.Usage.Cost
+	} else if decoded.Usage.TotalCost != nil {
+		cost = *decoded.Usage.TotalCost
+	}
+
 	return &llmhub.Response{
 		ID:      decoded.ID,
 		Content: parts,
@@ -94,6 +101,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 			PromptTokens:     decoded.Usage.InputTokens,
 			CompletionTokens: decoded.Usage.OutputTokens,
 			TotalTokens:      decoded.Usage.InputTokens + decoded.Usage.OutputTokens,
+			Cost:             cost,
 		},
 		Raw: decoded,
 	}, nil
@@ -527,8 +535,10 @@ type anthropicResponse struct {
 }
 
 type usageBlock struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens  int      `json:"input_tokens"`
+	OutputTokens int      `json:"output_tokens"`
+	Cost         *float64 `json:"cost,omitempty"`
+	TotalCost    *float64 `json:"total_cost,omitempty"`
 }
 
 type anthropicDeltaEvent struct {

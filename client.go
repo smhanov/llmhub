@@ -36,8 +36,13 @@ func (c *Client) Generate(ctx context.Context, prompt []*Message, opts ...Option
 }
 
 // computeCost populates Response.Usage.Cost based on token counts and configured rates.
+// If the provider already reported a cost in the response, that cost is preserved
+// and overrides any rates configured via WithCost.
 func computeCost(resp *Response, opts []Option) {
 	if resp == nil {
+		return
+	}
+	if resp.Usage.Cost != 0 {
 		return
 	}
 	cfg := NewConfig(opts...)
