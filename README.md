@@ -640,6 +640,8 @@ go run ./examples/cli \
 
 Issues and PRs are welcome! Start by filing an issue describing the provider or feature you would like to add, then open a PR with tests and documentation. Check the existing provider stubs (Anthropic, Gemini, Ollama) for extension points.
 
+This project uses a **rebase-only workflow** for merging into `main`: PRs are rebased onto `main` and merged with a fast-forward rebase (`gh pr merge --rebase`) — never merge commits or squash. Keep your branches up to date with `git rebase main` and keep commits small and clean, as they land in `main` individually.
+
 ## License
 
 MIT License © 2026 llmhub contributors

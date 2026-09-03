@@ -163,7 +163,10 @@ func WithHeader(key, value string) Option {
 	}
 }
 
-// WithExtraBody merges arbitrary additional fields into the outbound request body.
+// WithExtraBody adds arbitrary additional fields to the outbound JSON request
+// body. On key collision, these fields override the standard generated fields.
+// Applies only to OpenAI-compatible providers (OpenAI, OpenRouter, xAI);
+// other providers ignore it. Values must be valid JSON.
 func WithExtraBody(extra map[string]json.RawMessage) Option {
 	return func(c *Config) {
 		if c.ExtraBody == nil {
