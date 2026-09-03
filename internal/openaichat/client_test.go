@@ -141,7 +141,8 @@ func TestClientStream_TrailingUsageChunk(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.Flusher")
+			http.Error(w, "response writer does not flush", http.StatusInternalServerError)
+			return
 		}
 
 		// Content chunk 1
