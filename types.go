@@ -216,6 +216,7 @@ type StreamChunk struct {
 	Delta          string
 	ReasoningDelta string
 	ToolCalls      []*ToolCallContent
+	Usage          *UsageMetadata
 	Done           bool
 	Err            error
 }

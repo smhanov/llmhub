@@ -2,6 +2,7 @@ package llmhub
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/smhanov/llmhub/auth"
@@ -88,5 +89,99 @@ func TestTokenSourceOption(t *testing.T) {
 	clone := cfg.Clone()
 	if clone.TokenSource != src {
 		t.Fatalf("expected cloned TokenSource to be preserved")
+	}
+}
+
+func TestWithHeader(t *testing.T) {
+	cfg := NewConfig(
+		WithHeader("X-Test-1", "value1"),
+		WithHeader("X-Test-2", "value2"),
+	)
+	if cfg.Headers["X-Test-1"] != "value1" {
+		t.Fatalf("expected X-Test-1 'value1', got %q", cfg.Headers["X-Test-1"])
+	}
+	if cfg.Headers["X-Test-2"] != "value2" {
+		t.Fatalf("expected X-Test-2 'value2', got %q", cfg.Headers["X-Test-2"])
+	}
+
+	// Verify safe population when Headers map is nil
+	var emptyCfg Config
+	WithHeader("X-Nil-Init", "safe")(&emptyCfg)
+	if emptyCfg.Headers["X-Nil-Init"] != "safe" {
+		t.Fatalf("expected X-Nil-Init 'safe' on nil headers config, got %q", emptyCfg.Headers["X-Nil-Init"])
+	}
+
+	// Verify clone isolation
+	clone := cfg.Clone()
+	clone.Headers["X-Test-1"] = "mutated"
+	if cfg.Headers["X-Test-1"] != "value1" {
+		t.Fatalf("header mutation on clone leaked to original config")
+	}
+}
+
+func TestWithExtraBody(t *testing.T) {
+	body1 := map[string]json.RawMessage{
+		"reasoning_effort": json.RawMessage(`"high"`),
+		"max_tokens":       json.RawMessage(`2048`),
+	}
+	body2 := map[string]json.RawMessage{
+		"metadata": json.RawMessage(`{"user_id":"test-user"}`),
+	}
+
+	cfg := NewConfig(
+		WithExtraBody(body1),
+		WithExtraBody(body2),
+	)
+
+	if string(cfg.ExtraBody["reasoning_effort"]) != `"high"` {
+		t.Fatalf("expected reasoning_effort 'high', got %s", string(cfg.ExtraBody["reasoning_effort"]))
+	}
+	if string(cfg.ExtraBody["max_tokens"]) != `2048` {
+		t.Fatalf("expected max_tokens '2048', got %s", string(cfg.ExtraBody["max_tokens"]))
+	}
+	if string(cfg.ExtraBody["metadata"]) != `{"user_id":"test-user"}` {
+		t.Fatalf("expected metadata '{\"user_id\":\"test-user\"}', got %s", string(cfg.ExtraBody["metadata"]))
+	}
+
+	// Modifying original map should not affect cfg.ExtraBody
+	body1["reasoning_effort"] = json.RawMessage(`"low"`)
+	if string(cfg.ExtraBody["reasoning_effort"]) != `"high"` {
+		t.Fatalf("mutating input map affected stored ExtraBody")
+	}
+
+	// Verify safe population when ExtraBody map is nil
+	var emptyCfg Config
+	WithExtraBody(map[string]json.RawMessage{"foo": json.RawMessage(`"bar"`)})(&emptyCfg)
+	if string(emptyCfg.ExtraBody["foo"]) != `"bar"` {
+		t.Fatalf("expected foo 'bar' on nil ExtraBody config")
+	}
+
+	// Verify ApplyOptions initializes ExtraBody if nil
+	var zeroCfg Config
+	ApplyOptions(&zeroCfg)
+	if zeroCfg.ExtraBody == nil {
+		t.Fatalf("expected ApplyOptions to initialize ExtraBody map")
+	}
+}
+
+func TestWithExtraBodyClone(t *testing.T) {
+	cfg := NewConfig(
+		WithExtraBody(map[string]json.RawMessage{
+			"reasoning_effort": json.RawMessage(`"medium"`),
+		}),
+	)
+
+	clone := cfg.Clone()
+
+	// 1. Add key to clone - original must not be affected
+	clone.ExtraBody["added_key"] = json.RawMessage(`123`)
+	if _, ok := cfg.ExtraBody["added_key"]; ok {
+		t.Fatalf("adding key to clone affected original ExtraBody")
+	}
+
+	// 2. Mutate byte slice in clone - original bytes must not be affected
+	clone.ExtraBody["reasoning_effort"][1] = 'x'
+	if string(cfg.ExtraBody["reasoning_effort"]) != `"medium"` {
+		t.Fatalf("byte mutation on clone affected original ExtraBody value")
 	}
 }
