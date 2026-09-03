@@ -1,6 +1,6 @@
 # llmhub
 
-Unified, provider-agnostic Go client for modern Large Language Models (LLMs). llmhub wraps multiple vendors (OpenAI, Anthropic, Gemini, Ollama, OpenRouter, and your own) behind a single, expressive API that understands multi-modal messages, streaming, and provider registries.
+Unified, provider-agnostic Go client for modern Large Language Models (LLMs). llmhub wraps multiple vendors (OpenAI, Anthropic, Gemini, Ollama, OpenRouter, Z.AI, and your own) behind a single, expressive API that understands multi-modal messages, streaming, and provider registries.
 
 ## Why llmhub?
 
@@ -55,6 +55,8 @@ func main() {
 ```go
 stream, err := client.Stream(ctx, prompt)
 if err != nil {
+    // HTTP 4xx/5xx from the provider, including 429, fail here so callers
+    // can fail over before writing downstream streaming headers.
     log.Fatal(err)
 }
 for chunk := range stream {
@@ -144,7 +146,7 @@ finalResp, _ := client.Generate(ctx, messages)
 fmt.Println(finalResp.Text())
 ```
 
-Tool choice helpers include `AutoToolChoice`, `NoToolChoice`, `RequiredToolChoice`, and `NamedToolChoice("tool_name")` for providers that expose tool-choice controls. Streaming tool calls are exposed on `StreamChunk.ToolCalls`.
+Tool choice helpers include `AutoToolChoice`, `NoToolChoice`, `RequiredToolChoice`, and `NamedToolChoice("tool_name")` for providers that expose tool-choice controls. Streaming tool calls are exposed on `StreamChunk.ToolCalls`. Parallel OpenAI-style argument fragments include `ToolCallContent.Index` so callers can reassemble concurrent tool calls.
 
 | Provider  | Tool Calling Support |
 | --------- | -------------------- |
@@ -154,6 +156,7 @@ Tool choice helpers include `AutoToolChoice`, `NoToolChoice`, `RequiredToolChoic
 | Ollama    | ✅ Native `/api/chat` tools |
 | xAI       | ✅ Chat Completions tools |
 | OpenRouter| ✅ Chat Completions tools |
+| Z.AI      | ✅ Chat Completions tools |
 
 ## Provider Registry
 
@@ -179,6 +182,7 @@ At runtime, consumers simply call `llmhub.New("my-llm", "token")`.
 | Ollama    | ✅ Production | Local inference via `/api/chat`, streaming friendly.     |
 | xAI       | ✅ Production | Grok models, API key or OAuth device flow, SSE streaming.|
 | OpenRouter| ✅ Production | OpenAI-compatible gateway to many vendors, returns per-request cost. |
+| Z.AI      | ✅ Production | GLM Chat Completions; exact versioned base URLs, no forced `/v1`. |
 
 ### OpenAI Provider Details
 
@@ -250,6 +254,25 @@ OpenRouter returns the actual per-request cost in every response
 (`usage.cost`), so `Response.Usage.Cost` is always the exact amount charged—
 no `WithCost` rates are needed for OpenRouter.
 
+### Z.AI Provider Details
+
+Import `providers/zai` to register the `zai` provider. It uses Z.AI's
+OpenAI-compatible Chat Completions API and keeps the versioned base URL
+exactly as supplied (no automatic `/v1` suffix). `New` defaults to the
+general endpoint; `NewCodingPlan` uses the Coding Plan endpoint.
+
+```go
+import (
+    "github.com/smhanov/llmhub"
+    "github.com/smhanov/llmhub/providers/zai"
+)
+
+client, err := llmhub.New("zai", apiKey,
+    llmhub.WithBaseURL(zai.CodingPlanBaseURL),
+    llmhub.WithModel("glm-5.3"),
+)
+```
+
 To reduce binary size, providers self-register when imported, enabling tree-shaking when unused.
 
 ```go
@@ -260,12 +283,13 @@ import (
     _ "github.com/smhanov/llmhub/providers/ollama"
     _ "github.com/smhanov/llmhub/providers/openrouter"
     _ "github.com/smhanov/llmhub/providers/xai"
+    _ "github.com/smhanov/llmhub/providers/zai"
 )
 ```
 
 Each provider reads the shared functional options:
 
-- `WithAPIKey` – supply SaaS credentials (`openai`, `anthropic`, `gemini`, `xai`, `openrouter`).
+- `WithAPIKey` – supply SaaS credentials (`openai`, `anthropic`, `gemini`, `xai`, `openrouter`, `zai`).
 - `WithTokenSource` – supply an OAuth / dynamic token source (`xai`).
 - `WithBaseURL` – point to proxies/self-hosted gateways.
 - `WithModel`, `WithTemperature` – customize LLM behavior per call. Often it is best to omit and go with the defaults.

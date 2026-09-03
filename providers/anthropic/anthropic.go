@@ -97,13 +97,8 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	return &llmhub.Response{
 		ID:      decoded.ID,
 		Content: parts,
-		Usage: llmhub.UsageMetadata{
-			PromptTokens:     decoded.Usage.InputTokens,
-			CompletionTokens: decoded.Usage.OutputTokens,
-			TotalTokens:      decoded.Usage.InputTokens + decoded.Usage.OutputTokens,
-			Cost:             cost,
-		},
-		Raw: decoded,
+		Usage:   *usageFromBlock(decoded.Usage, cost),
+		Raw:     decoded,
 	}, nil
 }
 
@@ -124,16 +119,16 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("anthropic: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 
 	ch := make(chan llmhub.StreamChunk)
 	go func() {
 		defer resp.Body.Close()
 		defer close(ch)
-		if resp.StatusCode >= 400 {
-			body, _ := io.ReadAll(resp.Body)
-			ch <- llmhub.StreamChunk{Err: fmt.Errorf("anthropic: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body))), Done: true}
-			return
-		}
 
 		decoder := sse.NewDecoder(resp.Body)
 		streamToolCalls := map[int]*llmhub.ToolCallContent{}
@@ -155,7 +150,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 					return
 				}
 				if start.ContentBlock.Type == "tool_use" {
-					streamToolCalls[start.Index] = llmhub.ToolCall(start.ContentBlock.ID, start.ContentBlock.Name, string(start.ContentBlock.Input))
+					streamToolCalls[start.Index] = llmhub.ToolCallWithIndex(start.Index, start.ContentBlock.ID, start.ContentBlock.Name, string(start.ContentBlock.Input))
 					streamToolArgs[start.Index] = &strings.Builder{}
 				}
 			case "content_block_delta":
@@ -173,8 +168,8 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 					builder.WriteString(delta.Delta.PartialJSON)
 					continue
 				}
-				text := strings.TrimSpace(delta.Delta.Text)
-				reasoning := strings.TrimSpace(delta.Delta.Thinking)
+				text := delta.Delta.Text
+				reasoning := delta.Delta.Thinking
 				if text == "" && reasoning == "" {
 					continue
 				}
@@ -204,6 +199,38 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
 					return
 				case ch <- llmhub.StreamChunk{ToolCalls: []*llmhub.ToolCallContent{toolCall}}:
+				}
+			case "message_start":
+				var start anthropicMessageStartEvent
+				if err := json.Unmarshal([]byte(event.Data), &start); err != nil {
+					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					return
+				}
+				usage := usageFromBlock(start.Message.Usage, 0)
+				if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.CacheReadTokens == 0 && usage.CacheCreationTokens == 0 {
+					continue
+				}
+				select {
+				case <-ctx.Done():
+					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					return
+				case ch <- llmhub.StreamChunk{Usage: usage}:
+				}
+			case "message_delta":
+				var delta anthropicMessageDeltaEvent
+				if err := json.Unmarshal([]byte(event.Data), &delta); err != nil {
+					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					return
+				}
+				usage := usageFromBlock(delta.Usage, 0)
+				if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.CacheReadTokens == 0 && usage.CacheCreationTokens == 0 {
+					continue
+				}
+				select {
+				case <-ctx.Done():
+					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					return
+				case ch <- llmhub.StreamChunk{Usage: usage}:
 				}
 			case "message_stop":
 				for index, toolCall := range streamToolCalls {
@@ -335,6 +362,10 @@ func convertToAnthropicMessage(msg *llmhub.Message) (anthropicMessage, error) {
 				return anthropicMessage{}, err
 			}
 			parts = append(parts, anthropicContent{Type: "image", Source: source})
+		case *llmhub.ReasoningContent:
+			if v.Text != "" {
+				parts = append(parts, anthropicContent{Type: "text", Text: v.Text})
+			}
 		case *llmhub.ToolCallContent:
 			input, err := toolInputRaw(v.Arguments)
 			if err != nil {
@@ -482,6 +513,17 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func usageFromBlock(u usageBlock, cost float64) *llmhub.UsageMetadata {
+	return &llmhub.UsageMetadata{
+		PromptTokens:        u.InputTokens,
+		CompletionTokens:    u.OutputTokens,
+		TotalTokens:         u.InputTokens + u.OutputTokens,
+		CacheReadTokens:     u.CacheReadInputTokens,
+		CacheCreationTokens: u.CacheCreationInputTokens,
+		Cost:                cost,
+	}
+}
+
 type anthropicRequest struct {
 	Model       string               `json:"model"`
 	Messages    []anthropicMessage   `json:"messages"`
@@ -535,10 +577,12 @@ type anthropicResponse struct {
 }
 
 type usageBlock struct {
-	InputTokens  int      `json:"input_tokens"`
-	OutputTokens int      `json:"output_tokens"`
-	Cost         *float64 `json:"cost,omitempty"`
-	TotalCost    *float64 `json:"total_cost,omitempty"`
+	InputTokens              int      `json:"input_tokens"`
+	OutputTokens             int      `json:"output_tokens"`
+	CacheReadInputTokens     int      `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int      `json:"cache_creation_input_tokens,omitempty"`
+	Cost                     *float64 `json:"cost,omitempty"`
+	TotalCost                *float64 `json:"total_cost,omitempty"`
 }
 
 type anthropicDeltaEvent struct {
@@ -563,4 +607,14 @@ type anthropicErrorEvent struct {
 	Error struct {
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+type anthropicMessageStartEvent struct {
+	Message struct {
+		Usage usageBlock `json:"usage"`
+	} `json:"message"`
+}
+
+type anthropicMessageDeltaEvent struct {
+	Usage usageBlock `json:"usage"`
 }

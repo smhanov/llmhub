@@ -25,6 +25,7 @@ const (
 type ClientConfig struct {
 	ProviderName          string
 	BaseConfig            llmhub.Config
+	NormalizeBaseURL      func(string) string
 	AuthHeaderAfterCustom bool
 }
 
@@ -32,14 +33,20 @@ type ClientConfig struct {
 type Client struct {
 	providerName          string
 	baseCfg               llmhub.Config
+	normalizeBaseURL      func(string) string
 	authHeaderAfterCustom bool
 }
 
 // NewClient creates a new shared OpenAI-compatible client.
 func NewClient(cfg ClientConfig) *Client {
+	normalize := cfg.NormalizeBaseURL
+	if normalize == nil {
+		normalize = ExactBaseURL
+	}
 	return &Client{
 		providerName:          cfg.ProviderName,
 		baseCfg:               cfg.BaseConfig,
+		normalizeBaseURL:      normalize,
 		authHeaderAfterCustom: cfg.AuthHeaderAfterCustom,
 	}
 }
@@ -109,6 +116,12 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	return resp, nil
 }
 
+func httpStatusError(provider string, resp *http.Response) error {
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("%s: http %d: %s", provider, resp.StatusCode, strings.TrimSpace(string(body)))
+}
+
 // Stream executes a streaming chat completion request and yields chunks over a channel.
 func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...llmhub.Option) (<-chan llmhub.StreamChunk, error) {
 	cfg := c.MergeConfig(opts...)
@@ -121,20 +134,14 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 	if err != nil {
 		return nil, err
 	}
+	if httpResp.StatusCode >= 400 {
+		return nil, httpStatusError(c.providerName, httpResp)
+	}
 
 	chunks := make(chan llmhub.StreamChunk)
 	go func() {
 		defer httpResp.Body.Close()
 		defer close(chunks)
-
-		if httpResp.StatusCode >= 400 {
-			body, _ := io.ReadAll(httpResp.Body)
-			chunks <- llmhub.StreamChunk{
-				Err:  fmt.Errorf("%s: http %d: %s", c.providerName, httpResp.StatusCode, strings.TrimSpace(string(body))),
-				Done: true,
-			}
-			return
-		}
 
 		decoder := sse.NewDecoder(httpResp.Body)
 		for {
@@ -231,7 +238,7 @@ func (c *Client) MergeConfig(opts ...llmhub.Option) llmhub.Config {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = c.baseCfg.BaseURL
 	}
-	cfg.BaseURL = EnsureV1Suffix(cfg.BaseURL)
+	cfg.BaseURL = c.normalizeBaseURL(cfg.BaseURL)
 	if strings.EqualFold(cfg.Model, "default") {
 		cfg.Model = c.baseCfg.Model
 	}
@@ -320,9 +327,14 @@ func (c *Client) buildHTTPRequest(ctx context.Context, cfg llmhub.Config, payloa
 	return req, usedToken, nil
 }
 
+// ExactBaseURL trims trailing slashes without adding a version suffix.
+func ExactBaseURL(base string) string {
+	return strings.TrimRight(base, "/")
+}
+
 // EnsureV1Suffix appends "/v1" to the base URL when not present.
 func EnsureV1Suffix(base string) string {
-	trimmed := strings.TrimRight(base, "/")
+	trimmed := ExactBaseURL(base)
 	if strings.HasSuffix(trimmed, "/v1") {
 		return trimmed
 	}
@@ -455,8 +467,9 @@ func ConvertToAPIMessage(msg *llmhub.Message) (ChatMessage, error) {
 			content = append(content, messageContent{Type: "image_url", ImageURL: &imageURL{URL: v.URL, Detail: v.Detail}})
 		case *llmhub.ToolCallContent:
 			toolCalls = append(toolCalls, OpenAIToolCall{
-				ID:   v.ID,
-				Type: "function",
+				Index: v.Index,
+				ID:    v.ID,
+				Type:  "function",
 				Function: OpenAIFunctionCall{
 					Name:      v.Name,
 					Arguments: v.Arguments,
@@ -552,11 +565,8 @@ func ConvertToolChoice(choice llmhub.ToolChoice) interface{} {
 }
 
 func appendToolCallParts(parts []llmhub.ContentPart, calls []OpenAIToolCall) []llmhub.ContentPart {
-	for _, call := range calls {
-		if call.Function.Name == "" {
-			continue
-		}
-		parts = append(parts, llmhub.ToolCall(call.ID, call.Function.Name, call.Function.Arguments))
+	for _, call := range ToolCallsFromAPI(calls) {
+		parts = append(parts, call)
 	}
 	return parts
 }
@@ -568,10 +578,10 @@ func ToolCallsFromAPI(calls []OpenAIToolCall) []*llmhub.ToolCallContent {
 	}
 	converted := make([]*llmhub.ToolCallContent, 0, len(calls))
 	for _, call := range calls {
-		if call.Function.Name == "" && call.Function.Arguments == "" {
+		if call.Function.Name == "" && call.Function.Arguments == "" && call.ID == "" {
 			continue
 		}
-		converted = append(converted, llmhub.ToolCall(call.ID, call.Function.Name, call.Function.Arguments))
+		converted = append(converted, llmhub.ToolCallWithIndex(call.Index, call.ID, call.Function.Name, call.Function.Arguments))
 	}
 	return converted
 }
@@ -701,6 +711,7 @@ type OpenAIToolFunction struct {
 }
 
 type OpenAIToolCall struct {
+	Index    int                `json:"index,omitempty"`
 	ID       string             `json:"id,omitempty"`
 	Type     string             `json:"type,omitempty"`
 	Function OpenAIFunctionCall `json:"function"`

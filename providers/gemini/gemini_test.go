@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/smhanov/llmhub"
@@ -121,6 +122,26 @@ func TestGeminiGenerateToolCalls(t *testing.T) {
 	calls := resp.ToolCalls()
 	if len(calls) != 1 || calls[0].Name != "weather" || calls[0].Arguments != `{"city":"Toronto"}` {
 		t.Fatalf("unexpected tool calls: %+v", calls)
+	}
+}
+
+func TestGeminiStreamHTTPErrorIsSynchronous(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, `{"error":{"message":"bad request"}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("secret", llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	_, err = provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err == nil {
+		t.Fatal("expected stream error")
+	}
+	if !strings.Contains(err.Error(), "http 400") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

@@ -316,7 +316,7 @@ func TestOpenAIStreamToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
-		fmt.Fprintf(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Toronto\\\"}\"}}]}}]}\n\n")
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Toronto\\\"}\"}}]}}]}\n\n")
 		flusher.Flush()
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		flusher.Flush()
@@ -332,8 +332,33 @@ func TestOpenAIStreamToolCalls(t *testing.T) {
 		t.Fatalf("stream: %v", err)
 	}
 	chunk := <-stream
-	if len(chunk.ToolCalls) != 1 || chunk.ToolCalls[0].Name != "weather" {
+	if len(chunk.ToolCalls) != 1 || chunk.ToolCalls[0].Name != "weather" || chunk.ToolCalls[0].Index != 0 {
 		t.Fatalf("unexpected tool call chunk: %+v", chunk)
+	}
+}
+
+func TestOpenAIStreamParallelToolCallIndices(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"true\"}}]}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("m"), llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	chunk := <-stream
+	if len(chunk.ToolCalls) != 1 || chunk.ToolCalls[0].Index != 1 || chunk.ToolCalls[0].Arguments != "true" {
+		t.Fatalf("unexpected indexed tool call chunk: %+v", chunk)
 	}
 }
 
@@ -384,13 +409,12 @@ func TestOpenAIHTTPError(t *testing.T) {
 		t.Fatalf("unexpected error message: %v", err)
 	}
 
-	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
-	if err != nil {
-		t.Fatalf("stream init error: %v", err)
+	_, err = provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err == nil {
+		t.Fatal("expected stream error on 401")
 	}
-	chunk := <-stream
-	if chunk.Err == nil || !strings.Contains(chunk.Err.Error(), "http 401") {
-		t.Fatalf("expected stream chunk error with 401, got: %+v", chunk)
+	if !strings.Contains(err.Error(), "http 401") || !strings.Contains(err.Error(), "invalid api key") {
+		t.Fatalf("unexpected stream error: %v", err)
 	}
 }
 

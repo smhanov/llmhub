@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/smhanov/llmhub"
@@ -155,6 +156,136 @@ func TestAnthropicStream(t *testing.T) {
 	finalChunk := <-stream
 	if !finalChunk.Done {
 		t.Fatalf("expected done chunk: %+v", finalChunk)
+	}
+}
+
+func TestAnthropicStreamPreservesWhitespace(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"delta\":{\"text\":\"function \"}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"delta\":{\"text\":\"foo()\"}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: message_stop\ndata: {}\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	var text string
+	for chunk := range stream {
+		text += chunk.Delta
+	}
+	if text != "function foo()" {
+		t.Fatalf("unexpected concatenated text: %q", text)
+	}
+}
+
+func TestAnthropicStreamUsageEvents(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":12,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":1}}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"delta\":{\"text\":\"hi\"}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: message_delta\ndata: {\"usage\":{\"output_tokens\":4}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: message_stop\ndata: {}\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	var chunks []llmhub.StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+	if len(chunks) < 3 {
+		t.Fatalf("expected usage and text chunks, got %+v", chunks)
+	}
+	if chunks[0].Usage == nil || chunks[0].Usage.PromptTokens != 12 || chunks[0].Usage.CacheReadTokens != 3 || chunks[0].Usage.CacheCreationTokens != 1 {
+		t.Fatalf("unexpected message_start usage: %+v", chunks[0])
+	}
+	if chunks[1].Delta != "hi" {
+		t.Fatalf("unexpected text chunk: %+v", chunks[1])
+	}
+	if chunks[2].Usage == nil || chunks[2].Usage.CompletionTokens != 4 {
+		t.Fatalf("unexpected message_delta usage: %+v", chunks[2])
+	}
+}
+
+func TestAnthropicStreamHTTPErrorIsSynchronous(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, `{"error":{"message":"bad request"}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	_, err = provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err == nil {
+		t.Fatal("expected stream error")
+	}
+	if !strings.Contains(err.Error(), "http 400") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAnthropicRoundTripReasoning(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		data, _ := io.ReadAll(r.Body)
+		var req anthropicRequest
+		if err := json.Unmarshal(data, &req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) != 1 {
+			t.Fatalf("expected one message, got %+v", req.Messages)
+		}
+		foundReasoning := false
+		for _, part := range req.Messages[0].Content {
+			if part.Type == "text" && part.Text == "prior thought" {
+				foundReasoning = true
+			}
+		}
+		if !foundReasoning {
+			t.Fatalf("expected prior reasoning as text, got %+v", req.Messages[0].Content)
+		}
+		io.WriteString(w, `{"id":"msg","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("claude-test"), llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewAssistantMessage(llmhub.Reasoning("prior thought"), llmhub.Text("previous answer")),
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if resp.Text() != "ok" {
+		t.Fatalf("unexpected response: %s", resp.Text())
 	}
 }
 

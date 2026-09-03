@@ -136,16 +136,16 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("gemini: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 
 	ch := make(chan llmhub.StreamChunk)
 	go func() {
 		defer resp.Body.Close()
 		defer close(ch)
-		if resp.StatusCode >= 400 {
-			body, _ := io.ReadAll(resp.Body)
-			ch <- llmhub.StreamChunk{Err: fmt.Errorf("gemini: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body))), Done: true}
-			return
-		}
 		scanner := bufio.NewScanner(resp.Body)
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 4*1024*1024)
@@ -317,6 +317,8 @@ func convertParts(parts []llmhub.ContentPart) ([]geminiPart, error) {
 		switch v := part.(type) {
 		case *llmhub.TextContent:
 			converted = append(converted, geminiPart{Text: v.Text})
+		case *llmhub.ReasoningContent:
+			converted = append(converted, geminiPart{Text: v.Text, Thought: true})
 		case *llmhub.ImageContent:
 			inline, err := toInlineData(v.URL)
 			if err != nil {

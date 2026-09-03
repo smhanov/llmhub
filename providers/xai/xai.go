@@ -89,6 +89,7 @@ func New(apiKey string, opts ...llmhub.Option) (llmhub.Provider, error) {
 		chat: openaichat.NewClient(openaichat.ClientConfig{
 			ProviderName:          providerName,
 			BaseConfig:            cfg,
+			NormalizeBaseURL:      openaichat.EnsureV1Suffix,
 			AuthHeaderAfterCustom: true,
 		}),
 	}, nil

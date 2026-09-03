@@ -45,10 +45,14 @@ func TestMessageHelpers(t *testing.T) {
 
 func TestToolHelpers(t *testing.T) {
 	call := ToolCall("call-1", "lookup", `{"id":"42"}`)
-	resp := &Response{Content: []ContentPart{Text("checking"), call}}
+	indexed := ToolCallWithIndex(1, "call-2", "search", `{"q":"x"}`)
+	resp := &Response{Content: []ContentPart{Text("checking"), call, indexed}}
 	calls := resp.ToolCalls()
-	if len(calls) != 1 || calls[0].Name != "lookup" || calls[0].Arguments != `{"id":"42"}` {
+	if len(calls) != 2 || calls[0].Name != "lookup" || calls[0].Arguments != `{"id":"42"}` {
 		t.Fatalf("unexpected tool calls: %+v", calls)
+	}
+	if calls[1].Index != 1 || calls[1].ID != "call-2" {
+		t.Fatalf("unexpected indexed tool call: %+v", calls[1])
 	}
 
 	msg := NewToolResultMessage("call-1", "lookup", Text(`{"ok":true}`))

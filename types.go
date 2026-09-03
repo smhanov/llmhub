@@ -140,6 +140,7 @@ func NamedToolChoice(name string) ToolChoice { return ToolChoice{Mode: ToolChoic
 
 // ToolCallContent represents a model-requested call to a tool.
 type ToolCallContent struct {
+	Index     int
 	ID        string
 	Name      string
 	Arguments string
@@ -153,12 +154,19 @@ func ToolCall(id, name, arguments string) *ToolCallContent {
 	return &ToolCallContent{ID: id, Name: name, Arguments: arguments}
 }
 
+// ToolCallWithIndex is a helper constructor for a streaming tool-call delta.
+func ToolCallWithIndex(index int, id, name, arguments string) *ToolCallContent {
+	return &ToolCallContent{Index: index, ID: id, Name: name, Arguments: arguments}
+}
+
 // UsageMetadata captures token consumption and cost information reported by providers.
 type UsageMetadata struct {
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
-	Cost             float64 // Estimated cost in US dollars based on configured per-million-token rates.
+	PromptTokens        int
+	CompletionTokens    int
+	TotalTokens         int
+	CacheReadTokens     int
+	CacheCreationTokens int
+	Cost                float64 // Estimated cost in US dollars based on configured per-million-token rates.
 }
 
 // Response contains the normalized result returned from a provider.

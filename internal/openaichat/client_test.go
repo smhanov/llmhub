@@ -7,10 +7,64 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/smhanov/llmhub"
 )
+
+func TestExactBaseURL(t *testing.T) {
+	if got := ExactBaseURL("https://api.z.ai/api/paas/v4/"); got != "https://api.z.ai/api/paas/v4" {
+		t.Fatalf("ExactBaseURL = %q", got)
+	}
+}
+
+func TestEnsureV1Suffix(t *testing.T) {
+	if got := EnsureV1Suffix("https://api.openai.com"); got != "https://api.openai.com/v1" {
+		t.Fatalf("EnsureV1Suffix = %q", got)
+	}
+}
+
+func TestClientStream_HTTPErrorIsSynchronous(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, `{"error":{"message":"bad request"}}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		ProviderName: "test-provider",
+		BaseConfig: llmhub.NewConfig(
+			llmhub.WithBaseURL(server.URL),
+			llmhub.WithHTTPClient(server.Client()),
+			llmhub.WithAPIKey("test-key"),
+			llmhub.WithModel("test-model"),
+		),
+	})
+	_, err := client.Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err == nil {
+		t.Fatal("expected stream error")
+	}
+	if !strings.Contains(err.Error(), "http 400") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestToolCallsFromAPIPreservesIndex(t *testing.T) {
+	calls := ToolCallsFromAPI([]OpenAIToolCall{{
+		Index: 2,
+		ID:    "call-2",
+		Function: OpenAIFunctionCall{
+			Name:      "lookup",
+			Arguments: `{"q":"x"}`,
+		},
+	}})
+	if len(calls) != 1 || calls[0].Index != 2 || calls[0].ID != "call-2" {
+		t.Fatalf("unexpected tool calls: %+v", calls)
+	}
+}
 
 func TestBuildRequestPayload_ExtraBodyMerging(t *testing.T) {
 	prompt := []*llmhub.Message{

@@ -26,10 +26,11 @@ import (
 	_ "github.com/smhanov/llmhub/providers/openai"
 	_ "github.com/smhanov/llmhub/providers/openrouter"
 	"github.com/smhanov/llmhub/providers/xai"
+	_ "github.com/smhanov/llmhub/providers/zai"
 )
 
 func main() {
-	provider := flag.String("provider", "", "Provider name: openai, anthropic, gemini, ollama, xai, openrouter")
+	provider := flag.String("provider", "", "Provider name: openai, anthropic, gemini, ollama, xai, openrouter, zai")
 	model := flag.String("model", "", "Model identifier")
 	apiKey := flag.String("api-key", "", "API key (or use env var OPENAI_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY, etc.)")
 	authFile := flag.String("auth-file", "", "Path to token file for OAuth-based providers (e.g. xAI)")
@@ -40,6 +41,7 @@ func main() {
 	temperature := flag.Float64("temperature", 0.7, "Sampling temperature")
 	maxTokens := flag.Int("max-tokens", 0, "Hard cap on generated tokens; leave unset unless you need it")
 	images := flag.String("images", "", "Comma-separated list of image file paths or URLs")
+	headers := flag.String("header", "", "Extra request headers as Key:Value, comma-separated")
 	inputCost := flag.Float64("input-cost", 0, "Cost per 1M input tokens in USD")
 	outputCost := flag.Float64("output-cost", 0, "Cost per 1M output tokens in USD")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Request timeout (e.g. 30s, 2m, 10m)")
@@ -101,6 +103,20 @@ func main() {
 	}
 	if *inputCost > 0 || *outputCost > 0 {
 		opts = append(opts, llmhub.WithCost(*inputCost, *outputCost))
+	}
+	if *headers != "" {
+		for _, raw := range strings.Split(*headers, ",") {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			headerKey, value, ok := strings.Cut(raw, ":")
+			if !ok || strings.TrimSpace(headerKey) == "" {
+				fmt.Fprintf(os.Stderr, "Error: -header values must be Key:Value, got %q\n", raw)
+				os.Exit(1)
+			}
+			opts = append(opts, llmhub.WithHeader(strings.TrimSpace(headerKey), strings.TrimSpace(value)))
+		}
 	}
 	if *authFile != "" && *provider == "xai" {
 		store := xai.NewFileTokenStore(*authFile)

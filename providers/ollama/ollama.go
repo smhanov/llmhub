@@ -120,16 +120,16 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ollama: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 
 	ch := make(chan llmhub.StreamChunk)
 	go func() {
 		defer resp.Body.Close()
 		defer close(ch)
-		if resp.StatusCode >= 400 {
-			body, _ := io.ReadAll(resp.Body)
-			ch <- llmhub.StreamChunk{Err: fmt.Errorf("ollama: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body))), Done: true}
-			return
-		}
 		scanner := bufio.NewScanner(resp.Body)
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 4*1024*1024)
@@ -256,11 +256,14 @@ func convertMessage(msg *llmhub.Message) (ollamaMessage, error) {
 		}, nil
 	}
 	var textBuilder strings.Builder
+	var thinkingBuilder strings.Builder
 	var toolCalls []ollamaToolCall
 	for _, part := range msg.Content {
 		switch v := part.(type) {
 		case *llmhub.TextContent:
 			textBuilder.WriteString(v.Text)
+		case *llmhub.ReasoningContent:
+			thinkingBuilder.WriteString(v.Text)
 		case *llmhub.ToolCallContent:
 			args, err := parseArguments(v.Arguments)
 			if err != nil {
@@ -275,10 +278,10 @@ func convertMessage(msg *llmhub.Message) (ollamaMessage, error) {
 				},
 			})
 		default:
-			return ollamaMessage{}, fmt.Errorf("ollama: only text and tool call content are supported")
+			return ollamaMessage{}, fmt.Errorf("ollama: only text, reasoning, and tool call content are supported")
 		}
 	}
-	return ollamaMessage{Role: string(msg.Role), Content: textBuilder.String(), ToolCalls: toolCalls}, nil
+	return ollamaMessage{Role: string(msg.Role), Content: textBuilder.String(), Thinking: thinkingBuilder.String(), ToolCalls: toolCalls}, nil
 }
 
 func flattenText(parts []llmhub.ContentPart) (string, error) {
