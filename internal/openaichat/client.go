@@ -159,24 +159,52 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				chunks <- llmhub.StreamChunk{Err: err, Done: true}
 				return
 			}
-			if len(streamResp.Choices) == 0 {
-				continue
+
+			var usage *llmhub.UsageMetadata
+			if streamResp.Usage != nil {
+				var cost float64
+				if streamResp.Usage.Cost != nil {
+					cost = *streamResp.Usage.Cost
+				} else if streamResp.Usage.TotalCost != nil {
+					cost = *streamResp.Usage.TotalCost
+				}
+				usage = &llmhub.UsageMetadata{
+					PromptTokens:     streamResp.Usage.PromptTokens,
+					CompletionTokens: streamResp.Usage.CompletionTokens,
+					TotalTokens:      streamResp.Usage.TotalTokens,
+					Cost:             cost,
+				}
 			}
-			deltaText, reasoningDelta, err := ExtractDeltaContent(streamResp.Choices[0].Delta.Content)
-			if err != nil {
-				chunks <- llmhub.StreamChunk{Err: err, Done: true}
-				return
+
+			var (
+				deltaText      string
+				reasoningDelta string
+				toolCalls      []*llmhub.ToolCallContent
+			)
+			if len(streamResp.Choices) > 0 {
+				var err error
+				deltaText, reasoningDelta, err = ExtractDeltaContent(streamResp.Choices[0].Delta.Content)
+				if err != nil {
+					chunks <- llmhub.StreamChunk{Err: err, Done: true}
+					return
+				}
+				reasoningDelta = FirstNonEmpty(reasoningDelta, streamResp.Choices[0].Delta.ReasoningContent, streamResp.Choices[0].Delta.Reasoning)
+				toolCalls = ToolCallsFromAPI(streamResp.Choices[0].Delta.ToolCalls)
 			}
-			reasoningDelta = FirstNonEmpty(reasoningDelta, streamResp.Choices[0].Delta.ReasoningContent, streamResp.Choices[0].Delta.Reasoning)
-			toolCalls := ToolCallsFromAPI(streamResp.Choices[0].Delta.ToolCalls)
-			if deltaText == "" && reasoningDelta == "" && len(toolCalls) == 0 {
+
+			if deltaText == "" && reasoningDelta == "" && len(toolCalls) == 0 && usage == nil {
 				continue
 			}
 			select {
 			case <-ctx.Done():
 				chunks <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
 				return
-			case chunks <- llmhub.StreamChunk{Delta: deltaText, ReasoningDelta: reasoningDelta, ToolCalls: toolCalls}:
+			case chunks <- llmhub.StreamChunk{
+				Delta:          deltaText,
+				ReasoningDelta: reasoningDelta,
+				ToolCalls:      toolCalls,
+				Usage:          usage,
+			}:
 			}
 		}
 	}()
@@ -365,7 +393,23 @@ func BuildRequestPayload(prompt []*llmhub.Message, cfg llmhub.Config, stream boo
 	if cfg.ToolChoice != nil {
 		req.ToolChoice = ConvertToolChoice(*cfg.ToolChoice)
 	}
-	return json.Marshal(req)
+
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	if len(cfg.ExtraBody) == 0 {
+		return payload, nil
+	}
+
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &merged); err != nil {
+		return nil, err
+	}
+	for k, v := range cfg.ExtraBody {
+		merged[k] = v
+	}
+	return json.Marshal(merged)
 }
 
 // ConvertToAPIMessage converts a normalized llmhub.Message into an OpenAI chat message.
@@ -701,6 +745,7 @@ type streamResponse struct {
 			ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
 		} `json:"delta"`
 	} `json:"choices"`
+	Usage *usageBlock `json:"usage,omitempty"`
 }
 
 type modelsResponse struct {

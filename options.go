@@ -1,6 +1,7 @@
 package llmhub
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/smhanov/llmhub/auth"
@@ -19,6 +20,7 @@ type Config struct {
 	BaseURL         string
 	HTTPClient      *http.Client
 	Headers         map[string]string
+	ExtraBody       map[string]json.RawMessage
 	EnableWebSearch bool // Enables web search/grounding (Gemini: google_search, Perplexity: always on)
 	Tools           []Tool
 	ToolChoice      *ToolChoice
@@ -44,6 +46,7 @@ func NewConfig(opts ...Option) Config {
 	cfg := Config{
 		Temperature: defaultTemperature,
 		Headers:     map[string]string{},
+		ExtraBody:   map[string]json.RawMessage{},
 	}
 	ApplyOptions(&cfg, opts...)
 	return cfg
@@ -53,6 +56,9 @@ func NewConfig(opts ...Option) Config {
 func ApplyOptions(cfg *Config, opts ...Option) {
 	if cfg.Headers == nil {
 		cfg.Headers = map[string]string{}
+	}
+	if cfg.ExtraBody == nil {
+		cfg.ExtraBody = map[string]json.RawMessage{}
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -68,6 +74,12 @@ func (c Config) Clone() Config {
 		clone.Headers = make(map[string]string, len(c.Headers))
 		for k, v := range c.Headers {
 			clone.Headers[k] = v
+		}
+	}
+	if c.ExtraBody != nil {
+		clone.ExtraBody = make(map[string]json.RawMessage, len(c.ExtraBody))
+		for k, v := range c.ExtraBody {
+			clone.ExtraBody[k] = append(json.RawMessage(nil), v...)
 		}
 	}
 	if c.ResponseModalities != nil {
@@ -148,6 +160,18 @@ func WithHeader(key, value string) Option {
 			c.Headers = map[string]string{}
 		}
 		c.Headers[key] = value
+	}
+}
+
+// WithExtraBody merges arbitrary additional fields into the outbound request body.
+func WithExtraBody(extra map[string]json.RawMessage) Option {
+	return func(c *Config) {
+		if c.ExtraBody == nil {
+			c.ExtraBody = make(map[string]json.RawMessage, len(extra))
+		}
+		for k, v := range extra {
+			c.ExtraBody[k] = append(json.RawMessage(nil), v...)
+		}
 	}
 }
 
