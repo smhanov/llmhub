@@ -75,7 +75,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 			req.Header.Set(k, v)
 		}
 		return req, nil
-	}, httpretry.DefaultConfig())
+	}, httpretry.FromLLMHub(cfg))
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +132,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			req.Header.Set(k, v)
 		}
 		return req, nil
-	}, httpretry.DefaultConfig())
+	}, httpretry.FromLLMHub(cfg))
 	if err != nil {
 		return nil, err
 	}
