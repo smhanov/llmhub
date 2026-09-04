@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/smhanov/llmhub"
@@ -340,10 +342,29 @@ func ExactBaseURL(base string) string {
 	return strings.TrimRight(base, "/")
 }
 
-// EnsureV1Suffix appends "/v1" to the base URL when not present.
+// versionSegmentSuffix matches a trailing version path segment such as "/v1",
+// "/v2", "/v4" or "/v10" at the end of a URL path.
+var versionSegmentSuffix = regexp.MustCompile(`/v[0-9]+$`)
+
+// hasTrailingVersionSegment reports whether the URL path already ends with a
+// version segment (/v1, /v2, /v4, ...). Vendors that pin a version other than
+// v1 (z.ai serves https://api.z.ai/api/paas/v4/chat/completions) must not get
+// "/v1" appended, otherwise requests land on a nonexistent /vN/v1/... path.
+func hasTrailingVersionSegment(base string) bool {
+	if u, err := url.Parse(base); err == nil && u.Path != "" {
+		return versionSegmentSuffix.MatchString(u.Path)
+	}
+	// Unparseable input (empty path, relative junk): fall back to the raw
+	// string so the historical suffix behaviour still applies.
+	return versionSegmentSuffix.MatchString(base)
+}
+
+// EnsureV1Suffix appends "/v1" to the base URL when it does not already end
+// with a version segment. Base URLs that already carry a version segment
+// (including a non-v1 one such as "/v4") are returned unchanged.
 func EnsureV1Suffix(base string) string {
 	trimmed := ExactBaseURL(base)
-	if strings.HasSuffix(trimmed, "/v1") {
+	if hasTrailingVersionSegment(trimmed) {
 		return trimmed
 	}
 	return trimmed + "/v1"

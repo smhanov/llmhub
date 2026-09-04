@@ -26,6 +26,12 @@ func TestEnsureV1Suffix(t *testing.T) {
 		{"http://localhost:11434", "http://localhost:11434/v1"},
 		{"http://localhost:11434/v1", "http://localhost:11434/v1"},
 		{"https://my-proxy.example.com/llm", "https://my-proxy.example.com/llm/v1"},
+		// A base URL that already pins a version segment (z.ai uses /v4) must
+		// not get "/v1" appended.
+		{"https://api.z.ai/api/paas/v4", "https://api.z.ai/api/paas/v4"},
+		{"https://api.z.ai/api/paas/v4/", "https://api.z.ai/api/paas/v4"},
+		{"https://example.test/api/v2", "https://example.test/api/v2"},
+		{"https://example.test/v1beta", "https://example.test/v1beta/v1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {

@@ -21,8 +21,31 @@ func TestExactBaseURL(t *testing.T) {
 }
 
 func TestEnsureV1Suffix(t *testing.T) {
-	if got := EnsureV1Suffix("https://api.openai.com"); got != "https://api.openai.com/v1" {
-		t.Fatalf("EnsureV1Suffix = %q", got)
+	tests := []struct {
+		input string
+		want  string
+	}{
+		// No version segment: "/v1" is appended.
+		{"https://api.openai.com", "https://api.openai.com/v1"},
+		{"https://api.openai.com/", "https://api.openai.com/v1"},
+		// Already versioned: unchanged, including non-v1 versions.
+		{"https://api.openai.com/v1", "https://api.openai.com/v1"},
+		{"https://api.openai.com/v1/", "https://api.openai.com/v1"},
+		{"https://api.z.ai/api/paas/v4", "https://api.z.ai/api/paas/v4"},
+		{"https://api.z.ai/api/paas/v4/", "https://api.z.ai/api/paas/v4"},
+		{"https://example.test/api/v2", "https://example.test/api/v2"},
+		{"https://example.test/api/v10", "https://example.test/api/v10"},
+		// Version-looking segments that are not version segments still get /v1.
+		{"https://example.test/v1beta", "https://example.test/v1beta/v1"},
+		{"https://example.test/av1", "https://example.test/av1/v1"},
+		{"https://example.test/llm", "https://example.test/llm/v1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := EnsureV1Suffix(tt.input); got != tt.want {
+				t.Errorf("EnsureV1Suffix(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 
