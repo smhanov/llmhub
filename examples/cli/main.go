@@ -45,6 +45,7 @@ func main() {
 	inputCost := flag.Float64("input-cost", 0, "Cost per 1M input tokens in USD")
 	outputCost := flag.Float64("output-cost", 0, "Cost per 1M output tokens in USD")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Request timeout (e.g. 30s, 2m, 10m)")
+	tools := flag.Bool("tools", false, "Enable a demo get_weather tool to exercise tool-calling")
 
 	flag.Parse()
 
@@ -123,6 +124,22 @@ func main() {
 		source := xai.NewTokenSource(store)
 		opts = append(opts, llmhub.WithTokenSource(source))
 	}
+	if *tools {
+		opts = append(opts, llmhub.WithTools(llmhub.NewTool(
+			"get_weather",
+			"Get the current weather for a city",
+			map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"city": map[string]interface{}{
+						"type":        "string",
+						"description": "City name, e.g. Toronto",
+					},
+				},
+				"required": []string{"city"},
+			},
+		)), llmhub.WithToolChoice(llmhub.RequiredToolChoice()))
+	}
 	opts = append(opts, llmhub.WithHTTPClient(&http.Client{Timeout: *timeout}))
 
 	client, err := llmhub.New(*provider, key, opts...)
@@ -177,10 +194,24 @@ func main() {
 				fmt.Fprintf(os.Stderr, "\nStream error: %v\n", chunk.Err)
 				os.Exit(1)
 			}
+			if chunk.ID != "" {
+				fmt.Fprintf(os.Stderr, "[id] %s\n", chunk.ID)
+			}
 			if chunk.ReasoningDelta != "" {
 				fmt.Fprintf(os.Stderr, "[reasoning] %s", chunk.ReasoningDelta)
 			}
 			fmt.Print(chunk.Delta)
+			for _, call := range chunk.ToolCalls {
+				fmt.Fprintf(os.Stderr, "\n[tool_call] index=%d id=%s name=%s args=%s\n", call.Index, call.ID, call.Name, call.Arguments)
+			}
+			if chunk.Usage != nil {
+				fmt.Fprintf(os.Stderr, "\n[usage] prompt=%d completion=%d total=%d cache_read=%d cache_creation=%d reasoning=%d cost=$%.6f\n",
+					chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.TotalTokens,
+					chunk.Usage.CacheReadTokens, chunk.Usage.CacheCreationTokens, chunk.Usage.ReasoningTokens, chunk.Usage.Cost)
+			}
+			if chunk.FinishReason != "" {
+				fmt.Fprintf(os.Stderr, "\n[finish_reason] %s\n", chunk.FinishReason)
+			}
 			if chunk.Done {
 				break
 			}
@@ -198,9 +229,17 @@ func main() {
 			fmt.Println("Reasoning:")
 			fmt.Println(reasoning)
 		}
+		if calls := resp.ToolCalls(); len(calls) > 0 {
+			fmt.Println("---")
+			fmt.Println("Tool calls:")
+			for _, call := range calls {
+				fmt.Printf("  id=%s name=%s args=%s\n", call.ID, call.Name, call.Arguments)
+			}
+		}
 		fmt.Println("---")
-		fmt.Printf("Tokens: prompt=%d, completion=%d, total=%d\n",
-			resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+		fmt.Printf("Tokens: prompt=%d, completion=%d, total=%d cache_read=%d cache_creation=%d reasoning=%d\n",
+			resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens,
+			resp.Usage.CacheReadTokens, resp.Usage.CacheCreationTokens, resp.Usage.ReasoningTokens)
 		if resp.Usage.Cost > 0 {
 			fmt.Printf("Cost: $%.6f\n", resp.Usage.Cost)
 		}

@@ -230,6 +230,93 @@ func TestAnthropicStreamUsageEvents(t *testing.T) {
 	}
 }
 
+func TestAnthropicStreamFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "event: message_start\ndata: {\"message\":{\"id\":\"msg_123\",\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"delta\":{\"text\":\"ok\"}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":2}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: message_stop\ndata: {}\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	var chunks []llmhub.StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+
+	// Chunk order: id (from message_start), text, finish_reason+usage, done.
+	var idFound bool
+	var reasonFound bool
+	for _, chunk := range chunks {
+		if chunk.ID == "msg_123" {
+			idFound = true
+		}
+		if chunk.FinishReason == "tool_calls" {
+			reasonFound = true
+			if chunk.Usage == nil {
+				t.Fatalf("expected finish reason chunk to carry usage, got %+v", chunk)
+			}
+		}
+	}
+	if !idFound {
+		t.Fatalf("expected message id chunk, got %+v", chunks)
+	}
+	if !reasonFound {
+		t.Fatalf("expected tool_calls finish reason chunk, got %+v", chunks)
+	}
+}
+
+func TestAnthropicStreamStopReasonMapsToStop(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"delta\":{\"text\":\"yes\"}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: message_stop\ndata: {}\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	var chunks []llmhub.StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+
+	var reasonFound bool
+	for _, chunk := range chunks {
+		if chunk.FinishReason == "stop" {
+			reasonFound = true
+		}
+	}
+	if !reasonFound {
+		t.Fatalf("expected stop finish reason chunk, got %+v", chunks)
+	}
+}
+
 func TestAnthropicStreamHTTPErrorIsSynchronous(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

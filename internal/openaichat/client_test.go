@@ -407,6 +407,257 @@ func TestClientStream_WithExtraBody(t *testing.T) {
 	}
 }
 
+func TestBuildRequestPayload_StreamIncludesUsageOption(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hello world")),
+	}
+	cfg := llmhub.NewConfig(llmhub.WithModel("gpt-4o"))
+
+	// Streaming requests always request usage so the proxy can rely on a
+	// trailing usage frame for failover-before-commit accounting.
+	payload, err := BuildRequestPayload(prompt, cfg, true)
+	if err != nil {
+		t.Fatalf("BuildRequestPayload(stream=true) failed: %v", err)
+	}
+	var decodedStream map[string]interface{}
+	if err := json.Unmarshal(payload, &decodedStream); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	streamOptions, ok := decodedStream["stream_options"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected stream_options in stream payload, got %v", decodedStream["stream_options"])
+	}
+	if streamOptions["include_usage"] != true {
+		t.Fatalf("expected include_usage true, got %v", streamOptions["include_usage"])
+	}
+
+	// Non-streaming requests must not include stream_options.
+	payload, err = BuildRequestPayload(prompt, cfg, false)
+	if err != nil {
+		t.Fatalf("BuildRequestPayload(stream=false) failed: %v", err)
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if _, present := decoded["stream_options"]; present {
+		t.Fatalf("expected no stream_options in non-stream payload, got %v", decoded["stream_options"])
+	}
+}
+
+func TestBuildRequestPayload_ExtraBodyStreamOptionsStillSupported(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hello world")),
+	}
+	cfg := llmhub.NewConfig(
+		llmhub.WithModel("gpt-4o"),
+		llmhub.WithExtraBody(map[string]json.RawMessage{
+			"stream_options": json.RawMessage(`{"include_usage":false}`),
+		}),
+	)
+	payload, err := BuildRequestPayload(prompt, cfg, true)
+	if err != nil {
+		t.Fatalf("BuildRequestPayload failed: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if string(decoded["stream_options"]) != `{"include_usage":false}` {
+		t.Fatalf("expected ExtraBody stream_options override, got %s", string(decoded["stream_options"]))
+	}
+}
+
+func TestClientStream_FinishReasonSurvivesSkipFilter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+
+		fmt.Fprintf(w, "data: {\"id\":\"stream-1\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		flusher.Flush()
+
+		// Final chunk carries only an empty delta plus a finish reason. It must
+		// survive the skip filter so callers can distinguish stop vs tool_calls.
+		fmt.Fprintf(w, "data: {\"id\":\"stream-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n")
+		flusher.Flush()
+
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		ProviderName: "test-provider",
+		BaseConfig: llmhub.NewConfig(
+			llmhub.WithBaseURL(server.URL),
+			llmhub.WithHTTPClient(server.Client()),
+			llmhub.WithAPIKey("test-key"),
+			llmhub.WithModel("test-model"),
+		),
+	})
+
+	chunksCh, err := client.Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	var chunks []llmhub.StreamChunk
+	for chunk := range chunksCh {
+		chunks = append(chunks, chunk)
+	}
+
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Delta != "hello" || chunks[0].ID != "stream-1" {
+		t.Fatalf("unexpected first chunk: %+v", chunks[0])
+	}
+	if chunks[1].Delta != "" || chunks[1].FinishReason != "tool_calls" {
+		t.Fatalf("expected finish_reason chunk, got %+v", chunks[1])
+	}
+	if !chunks[2].Done {
+		t.Fatalf("expected final Done chunk, got %+v", chunks[2])
+	}
+}
+
+func TestClientStream_StopFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+
+		fmt.Fprintf(w, "data: {\"id\":\"stream-2\",\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n")
+		flusher.Flush()
+
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		ProviderName: "test-provider",
+		BaseConfig: llmhub.NewConfig(
+			llmhub.WithBaseURL(server.URL),
+			llmhub.WithHTTPClient(server.Client()),
+			llmhub.WithAPIKey("test-key"),
+			llmhub.WithModel("test-model"),
+		),
+	})
+
+	chunksCh, err := client.Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	var chunks []llmhub.StreamChunk
+	for chunk := range chunksCh {
+		chunks = append(chunks, chunk)
+	}
+
+	if chunks[0].FinishReason != "stop" {
+		t.Fatalf("expected stop finish reason, got %+v", chunks[0])
+	}
+}
+
+func TestClientGenerate_UsageCacheAndReasoningParity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{
+			"id": "chatcmpl-usage",
+			"choices": [{"message": {"role": "assistant", "content": "hello"}}],
+			"usage": {
+				"prompt_tokens": 20,
+				"completion_tokens": 10,
+				"total_tokens": 30,
+				"prompt_tokens_details": {"cached_tokens": 7},
+				"completion_tokens_details": {"reasoning_tokens": 4}
+			}
+		}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		ProviderName: "test-provider",
+		BaseConfig: llmhub.NewConfig(
+			llmhub.WithBaseURL(server.URL),
+			llmhub.WithHTTPClient(server.Client()),
+			llmhub.WithAPIKey("test-key"),
+			llmhub.WithModel("test-model"),
+		),
+	})
+
+	resp, err := client.Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if resp.Usage.CacheReadTokens != 7 {
+		t.Fatalf("expected CacheReadTokens 7, got %d", resp.Usage.CacheReadTokens)
+	}
+	if resp.Usage.ReasoningTokens != 4 {
+		t.Fatalf("expected ReasoningTokens 4, got %d", resp.Usage.ReasoningTokens)
+	}
+	if resp.Usage.PromptTokens != 20 || resp.Usage.CompletionTokens != 10 || resp.Usage.TotalTokens != 30 {
+		t.Fatalf("unexpected usage: %+v", resp.Usage)
+	}
+}
+
+func TestClientStream_UsageCacheFromTrailingChunk(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+
+		fmt.Fprintf(w, "data: {\"id\":\"stream-3\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		flusher.Flush()
+		// Trailing usage frame reporting cache_creation and cache_read tokens.
+		fmt.Fprintf(w, "data: {\"id\":\"stream-3\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2,\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		ProviderName: "test-provider",
+		BaseConfig: llmhub.NewConfig(
+			llmhub.WithBaseURL(server.URL),
+			llmhub.WithHTTPClient(server.Client()),
+			llmhub.WithAPIKey("test-key"),
+			llmhub.WithModel("test-model"),
+		),
+	})
+
+	chunksCh, err := client.Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	var chunks []llmhub.StreamChunk
+	for chunk := range chunksCh {
+		chunks = append(chunks, chunk)
+	}
+
+	usageChunk := chunks[1]
+	if usageChunk.Usage == nil {
+		t.Fatalf("expected usage chunk, got %+v", usageChunk)
+	}
+	if usageChunk.Usage.CacheReadTokens != 3 {
+		t.Fatalf("expected CacheReadTokens 3, got %d", usageChunk.Usage.CacheReadTokens)
+	}
+	if usageChunk.Usage.CacheCreationTokens != 2 {
+		t.Fatalf("expected CacheCreationTokens 2, got %d", usageChunk.Usage.CacheCreationTokens)
+	}
+	if usageChunk.Usage.ReasoningTokens != 1 {
+		t.Fatalf("expected ReasoningTokens 1, got %d", usageChunk.Usage.ReasoningTokens)
+	}
+}
+
 func TestClientStream_EmptyChoicesNoUsageIgnored(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

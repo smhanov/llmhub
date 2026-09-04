@@ -178,19 +178,19 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			}
 			pending.Reset()
 			for _, current := range parsed {
-				text, reasoning, toolCalls, err := extractContent(current.Candidates)
+				text, reasoning, toolCalls, finishReason, err := extractContent(current.Candidates)
 				if err != nil {
 					ch <- llmhub.StreamChunk{Err: err, Done: true}
 					return
 				}
-				if text == "" && reasoning == "" && len(toolCalls) == 0 {
+				if text == "" && reasoning == "" && len(toolCalls) == 0 && finishReason == "" {
 					continue
 				}
 				select {
 				case <-ctx.Done():
 					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
 					return
-				case ch <- llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning, ToolCalls: toolCalls}:
+				case ch <- llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning, ToolCalls: toolCalls, FinishReason: finishReason}:
 				}
 			}
 		}
@@ -398,10 +398,10 @@ func convertGeminiParts(parts []geminiPart) ([]llmhub.ContentPart, error) {
 	return out, nil
 }
 
-func extractContent(candidates []candidate) (string, string, []*llmhub.ToolCallContent, error) {
+func extractContent(candidates []candidate) (string, string, []*llmhub.ToolCallContent, string, error) {
 	parts, err := convertCandidate(candidates)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, "", err
 	}
 	var textBuilder strings.Builder
 	var reasoningBuilder strings.Builder
@@ -416,7 +416,27 @@ func extractContent(candidates []candidate) (string, string, []*llmhub.ToolCallC
 			toolCalls = append(toolCalls, value)
 		}
 	}
-	return textBuilder.String(), reasoningBuilder.String(), toolCalls, nil
+	finishReason := ""
+	if len(candidates) > 0 {
+		finishReason = mapFinishReason(candidates[0].FinishReason)
+	}
+	return textBuilder.String(), reasoningBuilder.String(), toolCalls, finishReason, nil
+}
+
+// mapFinishReason translates a Gemini finish reason into the OpenAI finish
+// reason vocabulary used by StreamChunk.FinishReason. Unmappable reasons map
+// to the empty string, matching the contract that absent reasons stay empty.
+func mapFinishReason(reason string) string {
+	switch reason {
+	case "STOP":
+		return "stop"
+	case "MAX_TOKENS":
+		return "length"
+	case "MALFORMED_FUNCTION_CALL":
+		return "tool_calls"
+	default:
+		return ""
+	}
 }
 
 func convertTools(tools []llmhub.Tool) []functionDeclaration {
@@ -571,7 +591,8 @@ type geminiResponse struct {
 }
 
 type candidate struct {
-	Content geminiContent `json:"content"`
+	Content      geminiContent `json:"content"`
+	FinishReason string        `json:"finishReason,omitempty"`
 }
 
 type usageMetadata struct {

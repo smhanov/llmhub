@@ -207,6 +207,9 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 					return
 				}
 				usage := usageFromBlock(start.Message.Usage, 0)
+				if start.Message.ID != "" {
+					ch <- llmhub.StreamChunk{ID: start.Message.ID}
+				}
 				if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.CacheReadTokens == 0 && usage.CacheCreationTokens == 0 {
 					continue
 				}
@@ -223,14 +226,14 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 					return
 				}
 				usage := usageFromBlock(delta.Usage, 0)
-				if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.CacheReadTokens == 0 && usage.CacheCreationTokens == 0 {
+				if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.CacheReadTokens == 0 && usage.CacheCreationTokens == 0 && delta.Delta.StopReason == "" {
 					continue
 				}
 				select {
 				case <-ctx.Done():
 					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
 					return
-				case ch <- llmhub.StreamChunk{Usage: usage}:
+				case ch <- llmhub.StreamChunk{Usage: usage, FinishReason: mapStopReason(delta.Delta.StopReason)}:
 				}
 			case "message_stop":
 				for index, toolCall := range streamToolCalls {
@@ -611,10 +614,30 @@ type anthropicErrorEvent struct {
 
 type anthropicMessageStartEvent struct {
 	Message struct {
+		ID    string     `json:"id"`
 		Usage usageBlock `json:"usage"`
 	} `json:"message"`
 }
 
 type anthropicMessageDeltaEvent struct {
+	Delta struct {
+		StopReason string `json:"stop_reason"`
+	} `json:"delta"`
 	Usage usageBlock `json:"usage"`
+}
+
+// mapStopReason translates an Anthropic stop_reason into the OpenAI finish
+// reason vocabulary used by StreamChunk.FinishReason. Unmappable reasons map
+// to the empty string, matching the contract that absent reasons stay empty.
+func mapStopReason(reason string) string {
+	switch reason {
+	case "end_turn", "stop_sequence":
+		return "stop"
+	case "max_tokens":
+		return "length"
+	case "tool_use":
+		return "tool_calls"
+	default:
+		return ""
+	}
 }

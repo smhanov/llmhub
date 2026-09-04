@@ -166,6 +166,7 @@ type UsageMetadata struct {
 	TotalTokens         int
 	CacheReadTokens     int
 	CacheCreationTokens int
+	ReasoningTokens     int
 	Cost                float64 // Estimated cost in US dollars based on configured per-million-token rates.
 }
 
@@ -221,10 +222,23 @@ func (r *Response) ToolCalls() []*ToolCallContent {
 
 // StreamChunk represents a partial streaming response.
 type StreamChunk struct {
-	Delta          string
+	// ID is the upstream completion identifier when the provider reports one
+	// (OpenAI-compatible lanes and Anthropic). It is best-effort telemetry and
+	// may be empty for lanes that do not report a stable stream id.
+	ID string
+	// Delta is the incremental text produced since the previous chunk.
+	Delta string
+	// ReasoningDelta is the incremental reasoning text produced since the previous chunk.
 	ReasoningDelta string
-	ToolCalls      []*ToolCallContent
-	Usage          *UsageMetadata
-	Done           bool
-	Err            error
+	// ToolCalls carries streamed tool call deltas.
+	ToolCalls []*ToolCallContent
+	// Usage carries token and cost accounting when the upstream reports it.
+	Usage *UsageMetadata
+	// FinishReason describes how the response ended, using the OpenAI
+	// vocabulary (stop, length, tool_calls). It is empty when the upstream
+	// reports no reason or the reason cannot be mapped. It is typically set on
+	// the final content frame (not on the terminal Done frame).
+	FinishReason string
+	Done         bool
+	Err          error
 }

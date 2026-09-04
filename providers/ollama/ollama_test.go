@@ -202,3 +202,31 @@ func TestOllamaStreamThinking(t *testing.T) {
 		t.Fatalf("unexpected text delta: %+v", second)
 	}
 }
+
+func TestOllamaStreamDoneReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"message":{"role":"assistant","content":"long"},"done":false}`+"\n")
+		io.WriteString(w, `{"message":{"role":"assistant","content":""},"done":true,"done_reason":"length"}`+"\n")
+	}))
+	defer server.Close()
+
+	provider, err := New("", llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("ping"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	var chunks []llmhub.StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("expected text and done chunks, got %+v", chunks)
+	}
+	if chunks[len(chunks)-1].FinishReason != "length" {
+		t.Fatalf("expected length finish reason, got %+v", chunks[len(chunks)-1])
+	}
+}

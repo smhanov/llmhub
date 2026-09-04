@@ -178,7 +178,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				}
 			}
 			if chunk.Done {
-				ch <- llmhub.StreamChunk{Done: true}
+				ch <- llmhub.StreamChunk{Done: true, FinishReason: mapDoneReason(chunk.DoneReason)}
 				return
 			}
 		}
@@ -401,9 +401,24 @@ type chatResponse struct {
 	Message         ollamaMessage `json:"message"`
 	Response        string        `json:"response"`
 	Done            bool          `json:"done"`
+	DoneReason      string        `json:"done_reason"`
 	Error           string        `json:"error"`
 	PromptEvalCount int           `json:"prompt_eval_count"`
 	EvalCount       int           `json:"eval_count"`
 	Cost            *float64      `json:"cost,omitempty"`
 	TotalCost       *float64      `json:"total_cost,omitempty"`
+}
+
+// mapDoneReason translates an Ollama done_reason into the OpenAI finish
+// reason vocabulary used by StreamChunk.FinishReason. Unmappable reasons map
+// to the empty string, matching the contract that absent reasons stay empty.
+func mapDoneReason(reason string) string {
+	switch reason {
+	case "stop":
+		return "stop"
+	case "length":
+		return "length"
+	default:
+		return ""
+	}
 }

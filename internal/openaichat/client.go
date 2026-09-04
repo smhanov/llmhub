@@ -95,25 +95,38 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	parts = AppendReasoningParts(parts, decoded.Choices[0].Message.ReasoningContent, decoded.Choices[0].Message.Reasoning)
 	parts = appendToolCallParts(parts, decoded.Choices[0].Message.ToolCalls)
 
-	var cost float64
-	if decoded.Usage.Cost != nil {
-		cost = *decoded.Usage.Cost
-	} else if decoded.Usage.TotalCost != nil {
-		cost = *decoded.Usage.TotalCost
-	}
-
 	resp := &llmhub.Response{
 		ID:      decoded.ID,
 		Content: parts,
-		Usage: llmhub.UsageMetadata{
-			PromptTokens:     decoded.Usage.PromptTokens,
-			CompletionTokens: decoded.Usage.CompletionTokens,
-			TotalTokens:      decoded.Usage.TotalTokens,
-			Cost:             cost,
-		},
-		Raw: decoded,
+		Usage:   usageFromBlock(decoded.Usage),
+		Raw:     decoded,
 	}
 	return resp, nil
+}
+
+func usageFromBlock(u usageBlock) llmhub.UsageMetadata {
+	var cost float64
+	if u.Cost != nil {
+		cost = *u.Cost
+	} else if u.TotalCost != nil {
+		cost = *u.TotalCost
+	}
+	var cached, reasoning int
+	if u.PromptTokensDetails != nil {
+		cached = u.PromptTokensDetails.CachedTokens
+	}
+	if u.CompletionTokensDetails != nil {
+		reasoning = u.CompletionTokensDetails.ReasoningTokens
+	}
+	return llmhub.UsageMetadata{
+		PromptTokens:        u.PromptTokens,
+		CompletionTokens:    u.CompletionTokens,
+		TotalTokens:         u.TotalTokens,
+		CacheReadTokens:     cached + u.CacheReadInputTokens,
+		CacheCreationTokens: u.CacheCreationInputTokens,
+		ReasoningTokens:     reasoning,
+		Cost:                cost,
+	}
 }
 
 func httpStatusError(provider string, resp *http.Response) error {
@@ -169,24 +182,15 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 
 			var usage *llmhub.UsageMetadata
 			if streamResp.Usage != nil {
-				var cost float64
-				if streamResp.Usage.Cost != nil {
-					cost = *streamResp.Usage.Cost
-				} else if streamResp.Usage.TotalCost != nil {
-					cost = *streamResp.Usage.TotalCost
-				}
-				usage = &llmhub.UsageMetadata{
-					PromptTokens:     streamResp.Usage.PromptTokens,
-					CompletionTokens: streamResp.Usage.CompletionTokens,
-					TotalTokens:      streamResp.Usage.TotalTokens,
-					Cost:             cost,
-				}
+				u := usageFromBlock(*streamResp.Usage)
+				usage = &u
 			}
 
 			var (
 				deltaText      string
 				reasoningDelta string
 				toolCalls      []*llmhub.ToolCallContent
+				finishReason   string
 			)
 			if len(streamResp.Choices) > 0 {
 				var err error
@@ -197,9 +201,10 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				}
 				reasoningDelta = FirstNonEmpty(reasoningDelta, streamResp.Choices[0].Delta.ReasoningContent, streamResp.Choices[0].Delta.Reasoning)
 				toolCalls = ToolCallsFromAPI(streamResp.Choices[0].Delta.ToolCalls)
+				finishReason = streamResp.Choices[0].FinishReason
 			}
 
-			if deltaText == "" && reasoningDelta == "" && len(toolCalls) == 0 && usage == nil {
+			if deltaText == "" && reasoningDelta == "" && len(toolCalls) == 0 && usage == nil && finishReason == "" {
 				continue
 			}
 			select {
@@ -207,10 +212,12 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				chunks <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
 				return
 			case chunks <- llmhub.StreamChunk{
+				ID:             streamResp.ID,
 				Delta:          deltaText,
 				ReasoningDelta: reasoningDelta,
 				ToolCalls:      toolCalls,
 				Usage:          usage,
+				FinishReason:   finishReason,
 			}:
 			}
 		}
@@ -398,6 +405,9 @@ func BuildRequestPayload(prompt []*llmhub.Message, cfg llmhub.Config, stream boo
 		Temperature: cfg.Temperature,
 		MaxTokens:   cfg.MaxTokens,
 		Stream:      stream,
+	}
+	if stream {
+		req.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
 	if len(cfg.Tools) > 0 {
 		req.Tools = ConvertTools(cfg.Tools)
@@ -668,13 +678,21 @@ func FirstNonEmpty(values ...string) string {
 }
 
 type CompletionRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Temperature float64       `json:"temperature,omitempty"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
-	Stream      bool          `json:"stream,omitempty"`
-	Tools       []OpenAITool  `json:"tools,omitempty"`
-	ToolChoice  interface{}   `json:"tool_choice,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []ChatMessage  `json:"messages"`
+	Temperature   float64        `json:"temperature,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Stream        bool           `json:"stream,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	Tools         []OpenAITool   `json:"tools,omitempty"`
+	ToolChoice    interface{}    `json:"tool_choice,omitempty"`
+}
+
+// streamOptions mirrors the OpenAI stream_options parameter. llmhub always
+// requests include_usage on streaming requests so callers can rely on a
+// trailing usage frame for failover-before-commit accounting.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type ChatMessage struct {
@@ -739,11 +757,23 @@ type chatMessageResponse struct {
 }
 
 type usageBlock struct {
-	PromptTokens     int      `json:"prompt_tokens"`
-	CompletionTokens int      `json:"completion_tokens"`
-	TotalTokens      int      `json:"total_tokens"`
-	Cost             *float64 `json:"cost,omitempty"`
-	TotalCost        *float64 `json:"total_cost,omitempty"`
+	PromptTokens             int                      `json:"prompt_tokens"`
+	CompletionTokens         int                      `json:"completion_tokens"`
+	TotalTokens              int                      `json:"total_tokens"`
+	PromptTokensDetails      *promptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails  *completionTokensDetails `json:"completion_tokens_details,omitempty"`
+	CacheReadInputTokens     int                      `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int                      `json:"cache_creation_input_tokens,omitempty"`
+	Cost                     *float64                 `json:"cost,omitempty"`
+	TotalCost                *float64                 `json:"total_cost,omitempty"`
+}
+
+type promptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
+type completionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 type streamResponse struct {
@@ -755,6 +785,7 @@ type streamResponse struct {
 			ReasoningContent string           `json:"reasoning_content,omitempty"`
 			ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
 		} `json:"delta"`
+		FinishReason string `json:"finish_reason,omitempty"`
 	} `json:"choices"`
 	Usage *usageBlock `json:"usage,omitempty"`
 }

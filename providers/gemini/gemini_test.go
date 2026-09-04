@@ -215,6 +215,32 @@ func TestGeminiStreamSSEDataLines(t *testing.T) {
 	}
 }
 
+func TestGeminiStreamFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, `{"candidates":[{"content":{"parts":[{"text":"done"}]},"finishReason":"MAX_TOKENS"}]}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("secret", llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	var chunks []llmhub.StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+	if len(chunks) == 0 || chunks[0].FinishReason != "length" {
+		t.Fatalf("expected length finish reason (MAX_TOKENS), got %+v", chunks)
+	}
+	if chunks[0].Delta != "done" {
+		t.Fatalf("expected delta 'done', got %+v", chunks[0])
+	}
+}
+
 func TestGeminiStreamArrayPayload(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `[{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}]`)
