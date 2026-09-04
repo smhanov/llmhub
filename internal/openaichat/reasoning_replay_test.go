@@ -34,20 +34,12 @@ func TestConvertToAPIMessage_ReplayedReasoningUsesDedicatedField(t *testing.T) {
 		t.Errorf("expected Content to be only the answer text, got %v", got.Content)
 	}
 
-	// Wire shape: JSON must contain reasoning_content separate from content.
-	raw, err := json.Marshal(got)
-	if err != nil {
-		t.Fatalf("marshal failed: %v", err)
+	wire := marshalWire(t, got)
+	if wire["reasoning_content"] != "The user is asking for sqrt(144). 12 * 12 = 144." {
+		t.Errorf("expected reasoning_content on the wire, got: %v", wire["reasoning_content"])
 	}
-	var wire map[string]any
-	if err := json.Unmarshal(raw, &wire); err != nil {
-		t.Fatalf("unmarshal failed: %v", err)
-	}
-	if _, ok := wire["reasoning_content"]; !ok {
-		t.Errorf("expected reasoning_content field on the wire, got: %s", raw)
-	}
-	if content, ok := wire["content"].(string); ok && content == "The user is asking for sqrt(144). 12 * 12 = 144.12" {
-		t.Errorf("reasoning leaked into content: %v", wire["content"])
+	if wire["content"] != "12" {
+		t.Errorf("expected content %q on the wire, got: %v", "12", wire["content"])
 	}
 }
 
@@ -72,4 +64,58 @@ func TestConvertToAPIMessage_ReasoningOnlyAssistantTurn(t *testing.T) {
 	if got.Content != "" {
 		t.Errorf("expected empty Content for reasoning-only turn, got %v", got.Content)
 	}
+
+	wire := marshalWire(t, got)
+	if wire["reasoning_content"] != "thinking hard" {
+		t.Errorf("expected reasoning_content on the wire, got: %v", wire["reasoning_content"])
+	}
+	if content, ok := wire["content"]; !ok || content != "" {
+		t.Errorf("expected empty string content on the wire, got: %v", wire["content"])
+	}
+}
+
+func TestConvertToAPIMessage_ReasoningWithToolCalls(t *testing.T) {
+	msg := &llmhub.Message{
+		Role: llmhub.RoleAssistant,
+		Content: []llmhub.ContentPart{
+			&llmhub.ReasoningContent{Text: "need weather"},
+			&llmhub.TextContent{Text: "checking"},
+			llmhub.ToolCall("call-1", "get_weather", `{"city":"Toronto"}`),
+		},
+	}
+
+	got, err := ConvertToAPIMessage(msg)
+	if err != nil {
+		t.Fatalf("ConvertToAPIMessage failed: %v", err)
+	}
+	if got.ReasoningContent != "need weather" {
+		t.Errorf("expected ReasoningContent %q, got %q", "need weather", got.ReasoningContent)
+	}
+	if got.Content != "checking" {
+		t.Errorf("expected Content %q, got %v", "checking", got.Content)
+	}
+	if len(got.ToolCalls) != 1 || got.ToolCalls[0].ID != "call-1" {
+		t.Errorf("expected one tool call, got %+v", got.ToolCalls)
+	}
+
+	wire := marshalWire(t, got)
+	if wire["reasoning_content"] != "need weather" {
+		t.Errorf("expected reasoning_content on the wire, got: %v", wire["reasoning_content"])
+	}
+	if wire["content"] != "checking" {
+		t.Errorf("expected content %q on the wire, got: %v", "checking", wire["content"])
+	}
+}
+
+func marshalWire(t *testing.T, msg ChatMessage) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	return wire
 }

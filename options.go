@@ -25,10 +25,11 @@ type Config struct {
 	Tools           []Tool
 	ToolChoice      *ToolChoice
 
-	// NoRetryOn429 disables the automatic 429 retry-with-backoff applied by
-	// HTTP-backed providers. Set via WithNoRetryOn429(). Honest-429 proxies
-	// surface the rate limit to the caller immediately instead of masking it.
-	NoRetryOn429 bool
+	// RetryOnStatus overrides whether HTTP-backed providers retry a given
+	// status code. true means retry with backoff; false means return the
+	// response immediately. Statuses not present keep the default (retry
+	// 429 only). Set via WithRetryOnStatus.
+	RetryOnStatus map[int]bool
 
 	// ResponseModalities controls the output modalities the model should
 	// produce. For example, setting this to []string{"IMAGE"} tells the
@@ -101,6 +102,12 @@ func (c Config) Clone() Config {
 		choice := *c.ToolChoice
 		clone.ToolChoice = &choice
 	}
+	if c.RetryOnStatus != nil {
+		clone.RetryOnStatus = make(map[int]bool, len(c.RetryOnStatus))
+		for k, v := range c.RetryOnStatus {
+			clone.RetryOnStatus[k] = v
+		}
+	}
 	return clone
 }
 
@@ -158,14 +165,17 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
-// WithNoRetryOn429 disables the automatic 429 retry-with-backoff that
-// HTTP-backed providers apply by default. Honest-429 proxies (ultiproxy)
-// need the rate-limit error surfaced to the caller immediately so the
-// caller's own backoff/fallback logic can act on it — a single silent
-// in-proxy retry storm would otherwise mask quota state.
-func WithNoRetryOn429() Option {
+// WithRetryOnStatus overrides whether HTTP-backed providers retry a given
+// status code. By default, providers retry 429 with backoff. Pass
+// WithRetryOnStatus(429, false) to surface rate limits immediately so the
+// caller can apply its own backoff or failover. Pass true to opt into retry
+// for a status that is not retried by default (for example 500).
+func WithRetryOnStatus(status int, retry bool) Option {
 	return func(c *Config) {
-		c.NoRetryOn429 = true
+		if c.RetryOnStatus == nil {
+			c.RetryOnStatus = map[int]bool{}
+		}
+		c.RetryOnStatus[status] = retry
 	}
 }
 

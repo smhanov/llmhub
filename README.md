@@ -298,6 +298,7 @@ Each provider reads the shared functional options:
 - `WithTools`, `WithToolChoice` – enable user-defined tool calling.
 - `WithResponseModalities` – control output modalities (e.g. `"IMAGE"` for Gemini image generation).
 - `WithCost` – set per-million-token pricing for cost accounting.
+- `WithRetryOnStatus` – override HTTP retry for a status (`WithRetryOnStatus(429, false)` surfaces rate limits immediately).
 
 > [!WARNING]
 > Prefer not to use `WithMaxTokens` in normal application code. Provider defaults usually produce more complete answers, while an explicit cap that is too low commonly causes cut-off output.

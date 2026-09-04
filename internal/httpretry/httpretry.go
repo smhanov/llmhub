@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/smhanov/llmhub"
 )
 
 const (
@@ -25,6 +27,10 @@ type Config struct {
 	MaxRetries int
 	BaseDelay  time.Duration
 	MaxDelay   time.Duration
+	// RetryOnStatus overrides whether a status is retried. true means retry
+	// with backoff; false means return immediately. Statuses not present
+	// keep the default (retry 429 only).
+	RetryOnStatus map[int]bool
 }
 
 // DefaultConfig returns a conservative retry policy suitable for API rate limits.
@@ -36,7 +42,20 @@ func DefaultConfig() Config {
 	}
 }
 
-// Do issues an HTTP request and retries with backoff when a 429 response is received.
+// FromLLMHub returns the default retry policy with per-status overrides from cfg.
+func FromLLMHub(cfg llmhub.Config) Config {
+	rc := DefaultConfig()
+	if len(cfg.RetryOnStatus) == 0 {
+		return rc
+	}
+	rc.RetryOnStatus = make(map[int]bool, len(cfg.RetryOnStatus))
+	for status, retry := range cfg.RetryOnStatus {
+		rc.RetryOnStatus[status] = retry
+	}
+	return rc
+}
+
+// Do issues an HTTP request and retries with backoff for retryable statuses.
 func Do(ctx context.Context, client *http.Client, makeReq func() (*http.Request, error), cfg Config) (*http.Response, error) {
 	if cfg.MaxRetries < 0 {
 		cfg.MaxRetries = 0
@@ -56,7 +75,7 @@ func Do(ctx context.Context, client *http.Client, makeReq func() (*http.Request,
 		if err != nil {
 			return nil, err
 		}
-		if resp.StatusCode != http.StatusTooManyRequests {
+		if !shouldRetry(resp.StatusCode, cfg) {
 			return resp, nil
 		}
 		if attempt >= cfg.MaxRetries {
@@ -68,6 +87,13 @@ func Do(ctx context.Context, client *http.Client, makeReq func() (*http.Request,
 			return nil, ctx.Err()
 		}
 	}
+}
+
+func shouldRetry(status int, cfg Config) bool {
+	if retry, ok := cfg.RetryOnStatus[status]; ok {
+		return retry
+	}
+	return status == http.StatusTooManyRequests
 }
 
 func backoffDelay(resp *http.Response, cfg Config, attempt int) time.Duration {

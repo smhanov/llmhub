@@ -59,7 +59,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 		}
 		applyHeaders(req, cfg)
 		return req, nil
-	}, retryConfig(cfg))
+	}, httpretry.FromLLMHub(cfg))
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 		}
 		applyHeaders(req, cfg)
 		return req, nil
-	}, retryConfig(cfg))
+	}, httpretry.FromLLMHub(cfg))
 	if err != nil {
 		return nil, err
 	}
@@ -421,12 +421,4 @@ func mapDoneReason(reason string) string {
 	default:
 		return ""
 	}
-}
-
-func retryConfig(cfg llmhub.Config) httpretry.Config {
-	rc := httpretry.DefaultConfig()
-	if cfg.NoRetryOn429 {
-		rc.MaxRetries = 0
-	}
-	return rc
 }

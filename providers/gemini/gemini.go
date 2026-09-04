@@ -75,7 +75,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 			req.Header.Set(k, v)
 		}
 		return req, nil
-	}, retryConfig(cfg))
+	}, httpretry.FromLLMHub(cfg))
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +132,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			req.Header.Set(k, v)
 		}
 		return req, nil
-	}, retryConfig(cfg))
+	}, httpretry.FromLLMHub(cfg))
 	if err != nil {
 		return nil, err
 	}
@@ -601,12 +601,4 @@ type usageMetadata struct {
 	TotalTokenCount      int      `json:"totalTokenCount"`
 	Cost                 *float64 `json:"cost,omitempty"`
 	TotalCost            *float64 `json:"totalCost,omitempty"`
-}
-
-func retryConfig(cfg llmhub.Config) httpretry.Config {
-	rc := httpretry.DefaultConfig()
-	if cfg.NoRetryOn429 {
-		rc.MaxRetries = 0
-	}
-	return rc
 }

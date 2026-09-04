@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/smhanov/llmhub"
@@ -49,6 +50,39 @@ func TestClientStream_HTTPErrorIsSynchronous(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "http 400") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestClientGenerate_NoRetryOn429(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":{"message":"rate limited"}}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		ProviderName: "test-provider",
+		BaseConfig: llmhub.NewConfig(
+			llmhub.WithBaseURL(server.URL),
+			llmhub.WithHTTPClient(server.Client()),
+			llmhub.WithAPIKey("test-key"),
+			llmhub.WithModel("test-model"),
+			llmhub.WithRetryOnStatus(http.StatusTooManyRequests, false),
+		),
+	})
+	_, err := client.Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err == nil {
+		t.Fatal("expected generate error")
+	}
+	if !strings.Contains(err.Error(), "http 429") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts.Load())
 	}
 }
 

@@ -3,6 +3,7 @@ package llmhub
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"testing"
 
 	"github.com/smhanov/llmhub/auth"
@@ -89,6 +90,34 @@ func TestTokenSourceOption(t *testing.T) {
 	clone := cfg.Clone()
 	if clone.TokenSource != src {
 		t.Fatalf("expected cloned TokenSource to be preserved")
+	}
+}
+
+func TestWithRetryOnStatus(t *testing.T) {
+	cfg := NewConfig(
+		WithRetryOnStatus(429, false),
+		WithRetryOnStatus(500, true),
+	)
+	if cfg.RetryOnStatus[http.StatusTooManyRequests] {
+		t.Fatalf("expected 429 retry disabled")
+	}
+	if !cfg.RetryOnStatus[http.StatusInternalServerError] {
+		t.Fatalf("expected 500 retry enabled")
+	}
+
+	var emptyCfg Config
+	WithRetryOnStatus(429, false)(&emptyCfg)
+	if emptyCfg.RetryOnStatus == nil {
+		t.Fatalf("expected RetryOnStatus map to be initialized")
+	}
+	if emptyCfg.RetryOnStatus[429] {
+		t.Fatalf("expected 429 retry disabled on zero config")
+	}
+
+	clone := cfg.Clone()
+	clone.RetryOnStatus[429] = true
+	if cfg.RetryOnStatus[429] {
+		t.Fatalf("retry map mutation on clone leaked to original config")
 	}
 }
 

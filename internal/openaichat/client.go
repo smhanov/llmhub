@@ -255,10 +255,7 @@ func (c *Client) MergeConfig(opts ...llmhub.Option) llmhub.Config {
 func (c *Client) doRequest(ctx context.Context, cfg llmhub.Config, payload []byte) (*http.Response, error) {
 	var usedToken *auth.Token
 
-	retryCfg := httpretry.DefaultConfig()
-	if cfg.NoRetryOn429 {
-		retryCfg.MaxRetries = 0
-	}
+	retryCfg := httpretry.FromLLMHub(cfg)
 	httpResp, err := httpretry.Do(ctx, cfg.HTTPClient, func() (*http.Request, error) {
 		req, token, err := c.buildHTTPRequest(ctx, cfg, payload)
 		if err != nil {
