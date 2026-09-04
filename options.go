@@ -25,6 +25,11 @@ type Config struct {
 	Tools           []Tool
 	ToolChoice      *ToolChoice
 
+	// NoRetryOn429 disables the automatic 429 retry-with-backoff applied by
+	// HTTP-backed providers. Set via WithNoRetryOn429(). Honest-429 proxies
+	// surface the rate limit to the caller immediately instead of masking it.
+	NoRetryOn429 bool
+
 	// ResponseModalities controls the output modalities the model should
 	// produce. For example, setting this to []string{"IMAGE"} tells the
 	// Gemini image-generation models to return an image instead of text.
@@ -150,6 +155,17 @@ func WithBaseURL(url string) Option {
 func WithHTTPClient(client *http.Client) Option {
 	return func(c *Config) {
 		c.HTTPClient = client
+	}
+}
+
+// WithNoRetryOn429 disables the automatic 429 retry-with-backoff that
+// HTTP-backed providers apply by default. Honest-429 proxies (ultiproxy)
+// need the rate-limit error surfaced to the caller immediately so the
+// caller's own backoff/fallback logic can act on it — a single silent
+// in-proxy retry storm would otherwise mask quota state.
+func WithNoRetryOn429() Option {
+	return func(c *Config) {
+		c.NoRetryOn429 = true
 	}
 }
 
