@@ -459,10 +459,13 @@ func ConvertToAPIMessage(msg *llmhub.Message) (ChatMessage, error) {
 			return ChatMessage{Role: string(msg.Role), Content: text.Text}, nil
 		}
 		if reasoning, ok := msg.Content[0].(*llmhub.ReasoningContent); ok {
-			return ChatMessage{Role: string(msg.Role), Content: reasoning.Text}, nil
+			// Reasoning-only assistant turns replay via the dedicated
+			// reasoning_content field, never as plain content.
+			return ChatMessage{Role: string(msg.Role), Content: "", ReasoningContent: reasoning.Text}, nil
 		}
 	}
 	var textBuilder strings.Builder
+	var reasoningBuilder strings.Builder
 	var toolCalls []OpenAIToolCall
 	content := make([]messageContent, 0, len(msg.Content))
 	for _, part := range msg.Content {
@@ -471,8 +474,9 @@ func ConvertToAPIMessage(msg *llmhub.Message) (ChatMessage, error) {
 			textBuilder.WriteString(v.Text)
 			content = append(content, messageContent{Type: "text", Text: v.Text})
 		case *llmhub.ReasoningContent:
-			textBuilder.WriteString(v.Text)
-			content = append(content, messageContent{Type: "text", Text: v.Text})
+			// Replayed assistant reasoning goes in the dedicated
+			// reasoning_content field, never into plain content.
+			reasoningBuilder.WriteString(v.Text)
 		case *llmhub.ImageContent:
 			content = append(content, messageContent{Type: "image_url", ImageURL: &imageURL{URL: v.URL, Detail: v.Detail}})
 		case *llmhub.ToolCallContent:
@@ -494,9 +498,29 @@ func ConvertToAPIMessage(msg *llmhub.Message) (ChatMessage, error) {
 		if textBuilder.Len() > 0 {
 			contentValue = textBuilder.String()
 		}
-		return ChatMessage{Role: string(msg.Role), Content: contentValue, ToolCalls: toolCalls}, nil
+		return ChatMessage{
+			Role:             string(msg.Role),
+			Content:          contentValue,
+			ToolCalls:        toolCalls,
+			ReasoningContent: reasoningBuilder.String(),
+		}, nil
 	}
-	return ChatMessage{Role: string(msg.Role), Content: content}, nil
+	// Text-only turns (reasoning extracted into ReasoningContent) use the
+	// plain string wire form; mixed multimodal content keeps the part array.
+	if len(content) == 1 {
+		if content[0].Type == "text" {
+			return ChatMessage{
+				Role:             string(msg.Role),
+				Content:          content[0].Text,
+				ReasoningContent: reasoningBuilder.String(),
+			}, nil
+		}
+	}
+	return ChatMessage{
+		Role:             string(msg.Role),
+		Content:          content,
+		ReasoningContent: reasoningBuilder.String(),
+	}, nil
 }
 
 // ConvertFromAPIContent parses JSON response content from an OpenAI chat completion.
@@ -701,6 +725,10 @@ type ChatMessage struct {
 	Name       string           `json:"name,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
+	// ReasoningContent replays a prior assistant turn's reasoning
+	// (DeepSeek-style `reasoning_content`). It is request-side only; the
+	// response side parses it in chatMessageResponse.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 type messageContent struct {
