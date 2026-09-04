@@ -186,10 +186,11 @@ At runtime, consumers simply call `llmhub.New("my-llm", "token")`.
 
 ### OpenAI Provider Details
 
-**Automatic `/v1` suffix:** When a custom base URL is provided (via `WithBaseURL`), the
-OpenAI provider ensures the URL ends with `/v1`. If it doesn't, `/v1` is appended
-automatically. This means both `https://api.openai.com` and
-`https://api.openai.com/v1` are accepted and behave identically.
+**Automatic `/v1` suffix:** When a custom base URL is provided (via `WithBaseURL`),
+the OpenAI provider appends `/v1` unless the path already ends in a version
+segment (`/v1`, `/v4`, …). So `https://api.openai.com` and
+`https://api.openai.com/v1` behave identically, and a gateway that already pins
+a version (e.g. `https://api.z.ai/api/paas/v4`) is left unchanged.
 
 **`"default"` model:** When the model is set to `"default"` (case-insensitive), the
 provider queries the `/v1/models` endpoint at initialization and automatically
