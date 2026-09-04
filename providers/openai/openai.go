@@ -27,9 +27,9 @@ func init() {
 
 // New instantiates a new OpenAI provider.
 //
-// If the configured base URL does not end with "/v1", the suffix is appended
-// automatically so that callers can pass either "https://api.openai.com" or
-// "https://api.openai.com/v1".
+// If the configured base URL does not already end with a version segment
+// (/v1, /v4, …), "/v1" is appended automatically so that callers can pass
+// either "https://api.openai.com" or "https://api.openai.com/v1".
 //
 // When the model is set to "default" (case-insensitive), the provider queries
 // the /v1/models endpoint and selects the first available model.
@@ -78,7 +78,8 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 	return c.chat.Stream(ctx, prompt, opts...)
 }
 
-// ensureV1Suffix appends "/v1" to the base URL when it is not already present.
+// ensureV1Suffix appends "/v1" to the base URL when it does not already end
+// with a version segment.
 func ensureV1Suffix(base string) string {
 	return openaichat.EnsureV1Suffix(base)
 }

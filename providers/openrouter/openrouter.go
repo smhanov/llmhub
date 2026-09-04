@@ -28,9 +28,9 @@ func init() {
 
 // New instantiates a new OpenRouter provider.
 //
-// If the configured base URL does not end with "/v1", the suffix is appended
-// automatically so that callers can pass either "https://openrouter.ai/api" or
-// "https://openrouter.ai/api/v1".
+// If the configured base URL does not already end with a version segment
+// (/v1, /v4, …), "/v1" is appended automatically so that callers can pass
+// either "https://openrouter.ai/api" or "https://openrouter.ai/api/v1".
 //
 // When the model is set to "default" (case-insensitive), the provider queries
 // the /v1/models endpoint and selects the first available model.
