@@ -188,6 +188,63 @@ func TestBuildRequestPayload_ExtraBodyMerging(t *testing.T) {
 	}
 }
 
+func TestBuildRequestPayload_ThinkingLevel(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hello world")),
+	}
+
+	// Level set: reasoning_effort is sent.
+	cfg := llmhub.NewConfig(
+		llmhub.WithModel("o3-mini"),
+		llmhub.WithThinkingLevel(llmhub.ThinkingLevelMedium),
+	)
+	payload, err := BuildRequestPayload(prompt, cfg, false)
+	if err != nil {
+		t.Fatalf("BuildRequestPayload failed: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if string(decoded["reasoning_effort"]) != `"medium"` {
+		t.Fatalf("expected reasoning_effort 'medium', got %s", string(decoded["reasoning_effort"]))
+	}
+
+	// Unset: key is absent so the provider applies its default.
+	plainCfg := llmhub.NewConfig(llmhub.WithModel("gpt-4o"))
+	plainPayload, err := BuildRequestPayload(prompt, plainCfg, false)
+	if err != nil {
+		t.Fatalf("BuildRequestPayload failed: %v", err)
+	}
+	var plainDecoded map[string]json.RawMessage
+	if err := json.Unmarshal(plainPayload, &plainDecoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if _, ok := plainDecoded["reasoning_effort"]; ok {
+		t.Fatalf("reasoning_effort must be absent when ThinkingLevel is unset, got %s", string(plainDecoded["reasoning_effort"]))
+	}
+
+	// Explicit ExtraBody wins on collision with the mapped level.
+	overrideCfg := llmhub.NewConfig(
+		llmhub.WithModel("o3-mini"),
+		llmhub.WithThinkingLevel(llmhub.ThinkingLevelLow),
+		llmhub.WithExtraBody(map[string]json.RawMessage{
+			"reasoning_effort": json.RawMessage(`"high"`),
+		}),
+	)
+	overridePayload, err := BuildRequestPayload(prompt, overrideCfg, false)
+	if err != nil {
+		t.Fatalf("BuildRequestPayload failed: %v", err)
+	}
+	var overrideDecoded map[string]json.RawMessage
+	if err := json.Unmarshal(overridePayload, &overrideDecoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if string(overrideDecoded["reasoning_effort"]) != `"high"` {
+		t.Fatalf("expected ExtraBody reasoning_effort 'high' to win, got %s", string(overrideDecoded["reasoning_effort"]))
+	}
+}
+
 func TestClientGenerate_WithExtraBody(t *testing.T) {
 	var receivedBody map[string]json.RawMessage
 

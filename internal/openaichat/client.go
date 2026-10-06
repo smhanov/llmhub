@@ -428,6 +428,11 @@ func BuildRequestPayload(prompt []*llmhub.Message, cfg llmhub.Config, stream boo
 		MaxTokens:   cfg.MaxTokens,
 		Stream:      stream,
 	}
+	// ThinkingLevel maps to the OpenAI-style reasoning_effort control used
+	// by OpenAI reasoning models, Grok, and OpenRouter. Unset omits it.
+	if cfg.ThinkingLevel != "" {
+		req.ReasoningEffort = string(cfg.ThinkingLevel)
+	}
 	if stream {
 		req.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
@@ -732,6 +737,10 @@ type CompletionRequest struct {
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
 	Tools         []OpenAITool   `json:"tools,omitempty"`
 	ToolChoice    interface{}    `json:"tool_choice,omitempty"`
+	// ReasoningEffort carries llmhub.ThinkingLevel for OpenAI-style
+	// reasoning models (OpenAI, Grok, OpenRouter). An explicit
+	// reasoning_effort in ExtraBody still overrides this on collision.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // streamOptions mirrors the OpenAI stream_options parameter. llmhub always

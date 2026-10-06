@@ -249,16 +249,23 @@ func buildRequestBody(prompt []*llmhub.Message, cfg llmhub.Config) ([]byte, erro
 	if system != nil {
 		req.SystemInstruction = system
 	}
-	if cfg.Temperature != 0 || cfg.MaxTokens != 0 || len(cfg.ResponseModalities) > 0 {
+	if cfg.MaxTokens != 0 || len(cfg.ResponseModalities) > 0 || cfg.ThinkingLevel != "" {
 		req.GenerationConfig = &generationConfig{}
-		if cfg.Temperature != 0 {
-			req.GenerationConfig.Temperature = cfg.Temperature
-		}
 		if cfg.MaxTokens != 0 {
 			req.GenerationConfig.MaxOutputTokens = cfg.MaxTokens
 		}
 		if len(cfg.ResponseModalities) > 0 {
 			req.GenerationConfig.ResponseModalities = cfg.ResponseModalities
+		}
+		if cfg.ThinkingLevel != "" {
+			level := string(cfg.ThinkingLevel)
+			if cfg.ThinkingLevel == llmhub.ThinkingLevelXHigh {
+				// Gemini tops out at high; clamp the shared xhigh level.
+				level = string(llmhub.ThinkingLevelHigh)
+			}
+			req.GenerationConfig.ThinkingConfig = &thinkingConfig{
+				ThinkingLevel: level,
+			}
 		}
 	}
 	if cfg.EnableWebSearch {
@@ -580,9 +587,16 @@ type fileData struct {
 }
 
 type generationConfig struct {
-	Temperature        float64  `json:"temperature,omitempty"`
-	MaxOutputTokens    int      `json:"maxOutputTokens,omitempty"`
-	ResponseModalities []string `json:"responseModalities,omitempty"`
+	MaxOutputTokens    int             `json:"maxOutputTokens,omitempty"`
+	ResponseModalities []string        `json:"responseModalities,omitempty"`
+	ThinkingConfig     *thinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+// thinkingConfig carries the Gemini 3+ thinking level. The deprecated
+// thinking_budget fallback and custom sampling parameters (temperature,
+// top_p, top_k) are intentionally not sent.
+type thinkingConfig struct {
+	ThinkingLevel string `json:"thinkingLevel,omitempty"`
 }
 
 type geminiResponse struct {

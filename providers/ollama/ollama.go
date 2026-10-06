@@ -227,6 +227,19 @@ func buildChatRequest(prompt []*llmhub.Message, cfg llmhub.Config, stream bool) 
 		Messages: msgs,
 		Stream:   stream,
 	}
+	// ThinkingLevel maps to the top-level think control: minimal disables
+	// thinking, low/medium/high select that named level, and xhigh is
+	// clamped to high. Unset omits think, using the model default.
+	switch cfg.ThinkingLevel {
+	case llmhub.ThinkingLevelMinimal:
+		req.Think = false
+	case llmhub.ThinkingLevelLow:
+		req.Think = "low"
+	case llmhub.ThinkingLevelMedium:
+		req.Think = "medium"
+	case llmhub.ThinkingLevelHigh, llmhub.ThinkingLevelXHigh:
+		req.Think = "high"
+	}
 	if len(cfg.Tools) > 0 {
 		req.Tools = convertTools(cfg.Tools)
 	}
@@ -364,6 +377,9 @@ type chatRequest struct {
 	Stream   bool                   `json:"stream"`
 	Options  map[string]interface{} `json:"options,omitempty"`
 	Tools    []ollamaTool           `json:"tools,omitempty"`
+	// Think carries llmhub.ThinkingLevel: false, or a named level string.
+	// Omitted when unset so the model uses its default.
+	Think interface{} `json:"think,omitempty"`
 }
 
 type ollamaMessage struct {

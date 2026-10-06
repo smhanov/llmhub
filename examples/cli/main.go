@@ -39,6 +39,7 @@ func main() {
 	promptFile := flag.String("prompt-file", "", "File containing the prompt text")
 	stream := flag.Bool("stream", false, "Use streaming mode")
 	temperature := flag.Float64("temperature", 0.7, "Sampling temperature")
+	thinkingLevel := flag.String("thinking-level", "", "Reasoning depth: minimal, low, medium, high, xhigh (mapped per provider)")
 	maxTokens := flag.Int("max-tokens", 0, "Hard cap on generated tokens; leave unset unless you need it")
 	images := flag.String("images", "", "Comma-separated list of image file paths or URLs")
 	headers := flag.String("header", "", "Extra request headers as Key:Value, comma-separated")
@@ -97,7 +98,16 @@ func main() {
 		opts = append(opts, llmhub.WithBaseURL(*baseURL))
 	}
 	if *temperature != 0.7 {
-		opts = append(opts, llmhub.WithTemperature(*temperature))
+		// Gemini ignores temperature (Google rejects custom sampling
+		// parameters on newer models), so only send it for other providers.
+		if *provider != "gemini" {
+			opts = append(opts, llmhub.WithTemperature(*temperature))
+		} else {
+			fmt.Fprintln(os.Stderr, "Warning: -temperature is ignored for Gemini (deprecated by Google)")
+		}
+	}
+	if *thinkingLevel != "" {
+		opts = append(opts, llmhub.WithThinkingLevel(llmhub.ThinkingLevel(*thinkingLevel)))
 	}
 	if *maxTokens > 0 {
 		opts = append(opts, llmhub.WithMaxTokens(*maxTokens))

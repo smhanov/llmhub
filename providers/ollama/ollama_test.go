@@ -44,6 +44,54 @@ func TestOllamaGenerate(t *testing.T) {
 	}
 }
 
+func TestOllamaGenerateThinkingLevel(t *testing.T) {
+	cases := []struct {
+		name  string
+		level llmhub.ThinkingLevel
+		want  interface{}
+	}{
+		{name: "high", level: llmhub.ThinkingLevelHigh, want: "high"},
+		{name: "minimal disables", level: llmhub.ThinkingLevelMinimal, want: false},
+		{name: "xhigh clamps to high", level: llmhub.ThinkingLevelXHigh, want: "high"},
+		{name: "unset omits think", level: "", want: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer r.Body.Close()
+				data, _ := io.ReadAll(r.Body)
+				var req chatRequest
+				if err := json.Unmarshal(data, &req); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if tc.want == nil {
+					if req.Think != nil {
+						t.Fatalf("think must be absent when ThinkingLevel is unset, got %v", req.Think)
+					}
+				} else if req.Think != tc.want {
+					t.Fatalf("expected think %v, got %v", tc.want, req.Think)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				io.WriteString(w, `{"message":{"role":"assistant","content":"pong"},"done":true}`)
+			}))
+			defer server.Close()
+
+			var opts []llmhub.Option
+			opts = append(opts, llmhub.WithBaseURL(server.URL), llmhub.WithModel("local"))
+			if tc.level != "" {
+				opts = append(opts, llmhub.WithThinkingLevel(tc.level))
+			}
+			provider, err := New("", opts...)
+			if err != nil {
+				t.Fatalf("new provider: %v", err)
+			}
+			if _, err := provider.Generate(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("ping"))}); err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+		})
+	}
+}
+
 func TestOllamaGenerateWithCost(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"message":{"role":"assistant","content":"pong"},"prompt_eval_count":1,"eval_count":2,"cost":0.00005,"done":true}`)

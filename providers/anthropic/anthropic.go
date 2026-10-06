@@ -315,6 +315,16 @@ func buildRequestPayload(prompt []*llmhub.Message, cfg llmhub.Config, stream boo
 		Temperature: cfg.Temperature,
 		Stream:      stream,
 	}
+	// ThinkingLevel maps to the modern output_config.effort control
+	// (adaptive thinking, requires a 4.6+ model). Anthropic has no minimal
+	// level, so minimal maps to low. Unset omits output_config entirely.
+	if cfg.ThinkingLevel != "" {
+		effort := string(cfg.ThinkingLevel)
+		if cfg.ThinkingLevel == llmhub.ThinkingLevelMinimal {
+			effort = "low"
+		}
+		req.OutputConfig = &anthropicOutputConfig{Effort: effort}
+	}
 	if len(cfg.Tools) > 0 {
 		req.Tools = convertTools(cfg.Tools)
 	}
@@ -528,14 +538,21 @@ func usageFromBlock(u usageBlock, cost float64) *llmhub.UsageMetadata {
 }
 
 type anthropicRequest struct {
-	Model       string               `json:"model"`
-	Messages    []anthropicMessage   `json:"messages"`
-	System      string               `json:"system,omitempty"`
-	MaxTokens   int                  `json:"max_tokens"`
-	Temperature float64              `json:"temperature,omitempty"`
-	Stream      bool                 `json:"stream,omitempty"`
-	Tools       []anthropicTool      `json:"tools,omitempty"`
-	ToolChoice  *anthropicToolChoice `json:"tool_choice,omitempty"`
+	Model        string                 `json:"model"`
+	Messages     []anthropicMessage     `json:"messages"`
+	System       string                 `json:"system,omitempty"`
+	MaxTokens    int                    `json:"max_tokens"`
+	Temperature  float64                `json:"temperature,omitempty"`
+	Stream       bool                   `json:"stream,omitempty"`
+	Tools        []anthropicTool        `json:"tools,omitempty"`
+	ToolChoice   *anthropicToolChoice   `json:"tool_choice,omitempty"`
+	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
+}
+
+// anthropicOutputConfig carries the effort control for adaptive thinking
+// (low/medium/high/xhigh/max) on 4.6+ models.
+type anthropicOutputConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type anthropicMessage struct {

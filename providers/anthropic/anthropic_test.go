@@ -47,6 +47,58 @@ func TestAnthropicGenerate(t *testing.T) {
 	}
 }
 
+func TestAnthropicGenerateThinkingLevel(t *testing.T) {
+	cases := []struct {
+		name       string
+		level      llmhub.ThinkingLevel
+		wantNil    bool
+		wantEffort string
+	}{
+		{name: "low", level: llmhub.ThinkingLevelLow, wantEffort: "low"},
+		{name: "minimal maps to low", level: llmhub.ThinkingLevelMinimal, wantEffort: "low"},
+		{name: "xhigh", level: llmhub.ThinkingLevelXHigh, wantEffort: "xhigh"},
+		{name: "unset omits output_config", wantNil: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer r.Body.Close()
+				data, _ := io.ReadAll(r.Body)
+				var req anthropicRequest
+				if err := json.Unmarshal(data, &req); err != nil {
+					t.Fatalf("decode request: %v", err)
+				}
+				if tc.wantNil {
+					if req.OutputConfig != nil {
+						t.Fatalf("output_config must be absent when ThinkingLevel is unset, got %+v", req.OutputConfig)
+					}
+				} else {
+					if req.OutputConfig == nil || req.OutputConfig.Effort != tc.wantEffort {
+						t.Fatalf("expected output_config.effort %q, got %+v", tc.wantEffort, req.OutputConfig)
+					}
+				}
+				io.WriteString(w, `{"id":"msg","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+			}))
+			defer server.Close()
+
+			var opts []llmhub.Option
+			opts = append(opts, llmhub.WithModel("claude-test"), llmhub.WithBaseURL(server.URL))
+			if tc.level != "" {
+				opts = append(opts, llmhub.WithThinkingLevel(tc.level))
+			}
+			provider, err := New("key", opts...)
+			if err != nil {
+				t.Fatalf("new provider: %v", err)
+			}
+			if _, err := provider.Generate(context.Background(), []*llmhub.Message{
+				llmhub.NewUserMessage(llmhub.Text("hi")),
+			}); err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+		})
+	}
+}
+
 func TestAnthropicGenerateWithCost(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"id":"msg","content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":5,"output_tokens":7,"cost":0.0002}}`)

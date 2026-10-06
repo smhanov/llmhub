@@ -126,6 +126,32 @@ type ToolChoice struct {
 	Name string
 }
 
+// ThinkingLevel controls how much internal reasoning a model performs
+// before responding. It is a shared abstraction: each provider maps it to
+// its native thinking/effort control, and providers without one ignore it.
+// Unset (empty string) omits the control everywhere, using the model default.
+//
+// Per-provider mapping:
+//
+//	Gemini:     generationConfig.thinkingConfig.thinkingLevel
+//	            (minimal/low/medium/high; xhigh is clamped to high)
+//	OpenAI-lane (openai, xai, openrouter, zai): top-level reasoning_effort
+//	            (minimal/low/medium/high/xhigh, model-dependent)
+//	Anthropic:  output_config.effort, modern adaptive path, requires a
+//	            4.6+ model (minimal maps to low; low/medium/high/xhigh 1:1)
+//	Ollama:     top-level think (minimal maps to false, low/medium/high map
+//	            to "low"/"medium"/"high", xhigh is clamped to "high";
+//	            unknown level strings fall back to the model default)
+type ThinkingLevel string
+
+const (
+	ThinkingLevelMinimal ThinkingLevel = "minimal"
+	ThinkingLevelLow     ThinkingLevel = "low"
+	ThinkingLevelMedium  ThinkingLevel = "medium"
+	ThinkingLevelHigh    ThinkingLevel = "high"
+	ThinkingLevelXHigh   ThinkingLevel = "xhigh"
+)
+
 // AutoToolChoice lets the model choose whether to call tools.
 func AutoToolChoice() ToolChoice { return ToolChoice{Mode: ToolChoiceAuto} }
 

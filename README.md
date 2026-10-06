@@ -110,6 +110,24 @@ for _, part := range resp.Content {
 
 For streaming, reasoning is exposed separately on each chunk via `StreamChunk.ReasoningDelta`.
 
+## Thinking Level
+
+Request-side reasoning depth is controlled with `WithThinkingLevel` (`minimal`, `low`, `medium`, `high`, `xhigh`). Unset means the model default. Each provider maps it to its native control; providers without one ignore it.
+
+```go
+client, _ := llmhub.New("openai", apiKey,
+    llmhub.WithModel("o3-mini"),
+    llmhub.WithThinkingLevel(llmhub.ThinkingLevelMedium),
+)
+```
+
+| Level | Gemini | OpenAI / xAI / OpenRouter / ZAI | Anthropic (4.6+) | Ollama |
+| --- | --- | --- | --- | --- |
+| unset | omit | omit | omit | omit |
+| `minimal` | `minimal` | `reasoning_effort: minimal` | `low` | `think: false` |
+| `low` / `medium` / `high` | 1:1 | 1:1 | 1:1 (`output_config.effort`) | `think: "low"` / `"medium"` / `"high"` |
+| `xhigh` | `high` (clamp) | `xhigh` | `xhigh` | `think: "high"` (clamp) |
+
 ## Tool Calling
 
 Declare tools with `WithTools`, read requested calls from `Response.ToolCalls()`, execute them in your code, then send the result back with `NewToolResultMessage`.

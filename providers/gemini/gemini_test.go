@@ -44,6 +44,48 @@ func TestGeminiGenerate(t *testing.T) {
 	}
 }
 
+func TestGeminiGenerateThinkingLevel(t *testing.T) {
+	cases := []struct {
+		name  string
+		level llmhub.ThinkingLevel
+		want  string
+	}{
+		{name: "high", level: llmhub.ThinkingLevelHigh, want: "high"},
+		{name: "xhigh clamps to high", level: llmhub.ThinkingLevelXHigh, want: "high"},
+		{name: "low", level: llmhub.ThinkingLevelLow, want: "low"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer r.Body.Close()
+				body, _ := io.ReadAll(r.Body)
+				var req geminiRequest
+				if err := json.Unmarshal(body, &req); err != nil {
+					t.Fatalf("decode request: %v", err)
+				}
+				if req.GenerationConfig == nil || req.GenerationConfig.ThinkingConfig == nil ||
+					req.GenerationConfig.ThinkingConfig.ThinkingLevel != tc.want {
+					t.Fatalf("expected thinkingLevel %q, got %+v", tc.want, req.GenerationConfig)
+				}
+				io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"pong"}]}}],"usageMetadata":{}}`)
+			}))
+			defer server.Close()
+
+			provider, err := New("secret",
+				llmhub.WithBaseURL(server.URL),
+				llmhub.WithModel("flash-test"),
+				llmhub.WithThinkingLevel(tc.level),
+			)
+			if err != nil {
+				t.Fatalf("provider new: %v", err)
+			}
+			if _, err := provider.Generate(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("ping"))}); err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+		})
+	}
+}
+
 func TestGeminiGenerateWithCost(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"pong"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3,"cost":0.0003}}`)

@@ -5,3 +5,6 @@
 *.gif
 *.mp4
 *.mov
+
+# Local repo task board (repo-todo skill)
+/.plans/

@@ -37,6 +37,11 @@ type Config struct {
 	// Leave nil for the provider default (text).
 	ResponseModalities []string
 
+	// ThinkingLevel controls reasoning depth across providers (see the
+	// ThinkingLevel type for the per-provider mapping). Leave empty for the
+	// model default. Providers without a native thinking control ignore it.
+	ThinkingLevel ThinkingLevel
+
 	// Cost accounting: prices expressed per 1 million tokens.
 	InputCostPerMillionTokens  float64
 	OutputCostPerMillionTokens float64
@@ -237,6 +242,16 @@ func WithToolChoice(choice ToolChoice) Option {
 func WithResponseModalities(modalities ...string) Option {
 	return func(c *Config) {
 		c.ResponseModalities = modalities
+	}
+}
+
+// WithThinkingLevel sets the reasoning depth ("minimal", "low", "medium",
+// "high", "xhigh"). Leave unset to use the model default. Each provider
+// maps it to its native thinking/effort control (see ThinkingLevel);
+// providers without one ignore it.
+func WithThinkingLevel(level ThinkingLevel) Option {
+	return func(c *Config) {
+		c.ThinkingLevel = level
 	}
 }
 
