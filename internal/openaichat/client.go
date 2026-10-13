@@ -25,19 +25,40 @@ const (
 
 // ClientConfig configures the shared OpenAI-compatible chat client.
 type ClientConfig struct {
-	ProviderName          string
-	BaseConfig            llmhub.Config
-	NormalizeBaseURL      func(string) string
+	ProviderName     string
+	BaseConfig       llmhub.Config
+	NormalizeBaseURL func(string) string
+	// CacheKeyHeader names an optional provider-specific request header
+	// that receives llmhub's CacheKey to maximize cache hits (xAI Grok
+	// uses x-grok-conv-id on Chat Completions). When empty, no cache
+	// header is sent and only the prompt_cache_key body field applies.
+	CacheKeyHeader string
+	// SupportsCacheDisable declares that the provider understands OpenAI's
+	// prompt_cache_options control. When set, opting out of prompt caching
+	// via WithPromptCache(false) renders prompt_cache_options
+	// {"mode":"explicit"} so the provider neither caches the prompt nor
+	// bills cache writes. Providers without the control ignore the flag.
+	SupportsCacheDisable  bool
 	AuthHeaderAfterCustom bool
 }
 
 // Client implements the OpenAI chat completions wire protocol for both streaming and non-streaming.
 type Client struct {
-	providerName          string
-	baseCfg               llmhub.Config
+	providerName string
+	baseCfg      llmhub.Config
+	// cacheKeyHeader mirrors ClientConfig.CacheKeyHeader: the request
+	// header that should carry the per-conversation cache key, if any.
+	cacheKeyHeader string
+	// supportsCacheDisable mirrors ClientConfig.SupportsCacheDisable.
+	supportsCacheDisable  bool
 	normalizeBaseURL      func(string) string
 	authHeaderAfterCustom bool
 }
+
+// promptCacheOptionsExplicit is the OpenAI control that turns caching off for
+// a request: explicit mode disables provider-managed breakpoints, and with no
+// prompt_cache_breakpoint blocks nothing is cacheable.
+var promptCacheOptionsExplicit = []byte(`{"mode":"explicit"}`)
 
 // NewClient creates a new shared OpenAI-compatible client.
 func NewClient(cfg ClientConfig) *Client {
@@ -48,6 +69,8 @@ func NewClient(cfg ClientConfig) *Client {
 	return &Client{
 		providerName:          cfg.ProviderName,
 		baseCfg:               cfg.BaseConfig,
+		cacheKeyHeader:        cfg.CacheKeyHeader,
+		supportsCacheDisable:  cfg.SupportsCacheDisable,
 		normalizeBaseURL:      normalize,
 		authHeaderAfterCustom: cfg.AuthHeaderAfterCustom,
 	}
@@ -63,10 +86,38 @@ func (c *Client) BaseConfig() llmhub.Config {
 	return c.baseCfg
 }
 
+// buildPayload builds the request payload via BuildRequestPayload and, when
+// the provider declares SupportsCacheDisable and the caller opted out of
+// prompt caching, injects OpenAI's prompt_cache_options {"mode":"explicit"}
+// so server-side automatic caching (and its cache-write billing) is truly
+// off. Injection happens before caller-supplied fields could matter: an
+// explicit prompt_cache_options in ExtraBody always wins, because
+// BuildRequestPayload has already merged it and buildPayload never
+// overwrites an existing key.
+func (c *Client) buildPayload(prompt []*llmhub.Message, cfg llmhub.Config, stream bool) ([]byte, error) {
+	payload, err := BuildRequestPayload(prompt, cfg, stream)
+	if err != nil || !c.supportsCacheDisable || cfg.PromptCacheEnabled() {
+		return payload, err
+	}
+
+	var merged map[string]json.RawMessage
+	if json.Unmarshal(payload, &merged) != nil {
+		// Defensive: BuildRequestPayload always produces valid JSON, so
+		// this cannot happen; return the payload unchanged rather than
+		// failing the request over an optimization.
+		return payload, nil
+	}
+	if _, exists := merged["prompt_cache_options"]; exists {
+		return payload, nil
+	}
+	merged["prompt_cache_options"] = append(json.RawMessage(nil), promptCacheOptionsExplicit...)
+	return json.Marshal(merged)
+}
+
 // Generate executes a non-streaming chat completion request.
 func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ...llmhub.Option) (*llmhub.Response, error) {
 	cfg := c.MergeConfig(opts...)
-	payload, err := BuildRequestPayload(prompt, cfg, false)
+	payload, err := c.buildPayload(prompt, cfg, false)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +191,7 @@ func httpStatusError(provider string, resp *http.Response) error {
 // Stream executes a streaming chat completion request and yields chunks over a channel.
 func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...llmhub.Option) (<-chan llmhub.StreamChunk, error) {
 	cfg := c.MergeConfig(opts...)
-	payload, err := BuildRequestPayload(prompt, cfg, true)
+	payload, err := c.buildPayload(prompt, cfg, true)
 	if err != nil {
 		return nil, err
 	}
@@ -334,6 +385,14 @@ func (c *Client) buildHTTPRequest(ctx context.Context, cfg llmhub.Config, payloa
 		}
 	}
 
+	// Prompt caching is enabled by default: when the provider declares a
+	// cache-key header (xAI Grok: x-grok-conv-id) and the caller set a
+	// cache key, render it so Chat Completions requests maximize cache
+	// hits. WithPromptCache(false) suppresses the header.
+	if c.cacheKeyHeader != "" && cfg.PromptCacheEnabled() && cfg.CacheKey != "" {
+		req.Header.Set(c.cacheKeyHeader, cfg.CacheKey)
+	}
+
 	return req, usedToken, nil
 }
 
@@ -432,6 +491,14 @@ func BuildRequestPayload(prompt []*llmhub.Message, cfg llmhub.Config, stream boo
 	// by OpenAI reasoning models, Grok, and OpenRouter. Unset omits it.
 	if cfg.ThinkingLevel != "" {
 		req.ReasoningEffort = string(cfg.ThinkingLevel)
+	}
+	// Prompt caching is enabled by default: the CacheKey renders as the
+	// OpenAI prompt_cache_key routing field (OpenRouter pins sticky
+	// routing to it). WithPromptCache(false) suppresses the field even
+	// when a key is set. An explicit prompt_cache_key in ExtraBody still
+	// overrides this on collision.
+	if cfg.PromptCacheEnabled() && cfg.CacheKey != "" {
+		req.PromptCacheKey = cfg.CacheKey
 	}
 	if stream {
 		req.StreamOptions = &streamOptions{IncludeUsage: true}
@@ -741,6 +808,12 @@ type CompletionRequest struct {
 	// reasoning models (OpenAI, Grok, OpenRouter). An explicit
 	// reasoning_effort in ExtraBody still overrides this on collision.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// PromptCacheKey carries llmhub's per-conversation cache key as the
+	// OpenAI prompt_cache_key routing field (OpenRouter uses it as its
+	// sticky-routing key fallback). Rendered only when prompt caching is
+	// enabled and a cache key is set; an explicit prompt_cache_key in
+	// ExtraBody still overrides this on collision.
+	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 }
 
 // streamOptions mirrors the OpenAI stream_options parameter. llmhub always

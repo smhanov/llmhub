@@ -42,6 +42,22 @@ type Config struct {
 	// model default. Providers without a native thinking control ignore it.
 	ThinkingLevel ThinkingLevel
 
+	// DisablePromptCache turns off prompt caching, which is enabled by
+	// default: llmhub emits whatever top-level cache-enabling fields the
+	// destination lane understands, and on the native OpenAI provider it
+	// additionally renders prompt_cache_options {"mode":"explicit"} so
+	// OpenAI's server-side automatic caching (which bills cache writes on
+	// GPT-5.6+) is truly off. Set via WithPromptCache(false).
+	DisablePromptCache bool
+
+	// CacheKey supplies a stable per-conversation prompt cache key. On the
+	// OpenAI-compatible lane it is rendered as the top-level
+	// prompt_cache_key routing field (OpenAI natively; OpenRouter uses it
+	// as its sticky-routing key fallback), and on xAI it is additionally
+	// sent as the x-grok-conv-id request header. Leave empty to rely on
+	// provider-automatic caching.
+	CacheKey string
+
 	// Cost accounting: prices expressed per 1 million tokens.
 	InputCostPerMillionTokens  float64
 	OutputCostPerMillionTokens float64
@@ -114,6 +130,13 @@ func (c Config) Clone() Config {
 		}
 	}
 	return clone
+}
+
+// PromptCacheEnabled reports whether prompt caching is on for this config.
+// Prompt caching is enabled by default: DisablePromptCache is false (the
+// zero value). Only WithPromptCache(false) turns it off.
+func (c Config) PromptCacheEnabled() bool {
+	return !c.DisablePromptCache
 }
 
 // WithModel selects the target model identifier.
@@ -252,6 +275,31 @@ func WithResponseModalities(modalities ...string) Option {
 func WithThinkingLevel(level ThinkingLevel) Option {
 	return func(c *Config) {
 		c.ThinkingLevel = level
+	}
+}
+
+// WithPromptCache turns prompt caching on or off for this config. Caching is
+// enabled by default: llmhub emits the cache-enabling fields each provider
+// understands (Anthropic automatic-caching cache_control marker; the OpenAI
+// prompt_cache_key routing field when a cache key is set via WithCacheKey).
+// Pass false to opt out everywhere: marker lanes (Anthropic) get no marker,
+// and the native OpenAI provider renders prompt_cache_options
+// {"mode":"explicit"} so OpenAI stops caching (and stops billing cache
+// writes) without any extra caller action.
+func WithPromptCache(enabled bool) Option {
+	return func(c *Config) {
+		c.DisablePromptCache = !enabled
+	}
+}
+
+// WithCacheKey sets a stable per-conversation prompt cache key. On the
+// OpenAI-compatible lane it is rendered as the top-level prompt_cache_key
+// routing field (OpenAI natively; OpenRouter pins sticky provider routing
+// to it from the first request), and on xAI it is additionally sent as the
+// x-grok-conv-id request header. Leave unset for provider-automatic caching.
+func WithCacheKey(key string) Option {
+	return func(c *Config) {
+		c.CacheKey = key
 	}
 }
 

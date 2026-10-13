@@ -214,3 +214,39 @@ func TestWithExtraBodyClone(t *testing.T) {
 		t.Fatalf("byte mutation on clone affected original ExtraBody value")
 	}
 }
+
+func TestWithPromptCache(t *testing.T) {
+	cfg := NewConfig()
+	if cfg.DisablePromptCache {
+		t.Fatalf("expected DisablePromptCache to be false (caching enabled) by default")
+	}
+	if !cfg.PromptCacheEnabled() {
+		t.Fatalf("expected prompt caching enabled by default")
+	}
+
+	optOut := NewConfig(WithPromptCache(false))
+	if !optOut.DisablePromptCache {
+		t.Fatalf("expected DisablePromptCache to be true after WithPromptCache(false)")
+	}
+	if optOut.PromptCacheEnabled() {
+		t.Fatalf("expected prompt caching disabled after WithPromptCache(false)")
+	}
+
+	optIn := NewConfig(WithPromptCache(true))
+	if optIn.DisablePromptCache {
+		t.Fatalf("expected DisablePromptCache to remain false after WithPromptCache(true)")
+	}
+	if !optIn.PromptCacheEnabled() {
+		t.Fatalf("expected prompt caching enabled after WithPromptCache(true)")
+	}
+}
+
+func TestWithCacheKey(t *testing.T) {
+	cfg := NewConfig(WithCacheKey("conv-1"))
+	if cfg.CacheKey != "conv-1" {
+		t.Fatalf("expected cache key 'conv-1', got %q", cfg.CacheKey)
+	}
+	if !cfg.PromptCacheEnabled() {
+		t.Fatalf("expected WithCacheKey to leave prompt caching enabled")
+	}
+}

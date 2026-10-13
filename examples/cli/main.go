@@ -40,6 +40,8 @@ func main() {
 	stream := flag.Bool("stream", false, "Use streaming mode")
 	temperature := flag.Float64("temperature", 0.7, "Sampling temperature")
 	thinkingLevel := flag.String("thinking-level", "", "Reasoning depth: minimal, low, medium, high, xhigh (mapped per provider)")
+	noCache := flag.Bool("no-cache", false, "Disable prompt caching (caching is enabled by default)")
+	cacheKey := flag.String("cache-key", "", "Stable per-conversation cache key (prompt_cache_key; x-grok-conv-id on xAI)")
 	maxTokens := flag.Int("max-tokens", 0, "Hard cap on generated tokens; leave unset unless you need it")
 	images := flag.String("images", "", "Comma-separated list of image file paths or URLs")
 	headers := flag.String("header", "", "Extra request headers as Key:Value, comma-separated")
@@ -108,6 +110,12 @@ func main() {
 	}
 	if *thinkingLevel != "" {
 		opts = append(opts, llmhub.WithThinkingLevel(llmhub.ThinkingLevel(*thinkingLevel)))
+	}
+	if *noCache {
+		opts = append(opts, llmhub.WithPromptCache(false))
+	}
+	if *cacheKey != "" {
+		opts = append(opts, llmhub.WithCacheKey(*cacheKey))
 	}
 	if *maxTokens > 0 {
 		opts = append(opts, llmhub.WithMaxTokens(*maxTokens))

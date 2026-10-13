@@ -150,6 +150,56 @@ func TestOpenAIGenerate(t *testing.T) {
 	}
 }
 
+func TestOpenAIGeneratePromptCacheDisable(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	}
+
+	run := func(t *testing.T, opts ...llmhub.Option) map[string]json.RawMessage {
+		t.Helper()
+		var received map[string]json.RawMessage
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer r.Body.Close()
+			data, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(data, &received); err != nil {
+				t.Errorf("decode request: %v", err)
+			}
+			io.WriteString(w, `{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+		}))
+		defer server.Close()
+
+		provider, err := New("key", append([]llmhub.Option{
+			llmhub.WithModel("test-model"),
+			llmhub.WithBaseURL(server.URL),
+		}, opts...)...)
+		if err != nil {
+			t.Fatalf("new provider: %v", err)
+		}
+		if _, err := provider.Generate(context.Background(), prompt); err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		return received
+	}
+
+	// Opting out disables OpenAI's server-side automatic caching natively.
+	received := run(t, llmhub.WithPromptCache(false))
+	if string(received["prompt_cache_options"]) != `{"mode":"explicit"}` {
+		t.Fatalf("expected prompt_cache_options explicit mode, got %s", string(received["prompt_cache_options"]))
+	}
+	if _, ok := received["prompt_cache_key"]; ok {
+		t.Fatalf("prompt_cache_key must be absent when caching is disabled")
+	}
+
+	// Default (caching enabled) emits no cache-control fields.
+	received = run(t)
+	if _, ok := received["prompt_cache_options"]; ok {
+		t.Fatalf("prompt_cache_options must be absent by default, got %s", string(received["prompt_cache_options"]))
+	}
+	if _, ok := received["prompt_cache_key"]; ok {
+		t.Fatalf("prompt_cache_key must be absent without a cache key")
+	}
+}
+
 func TestOpenAIGenerateWithCost(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12,"cost":0.00015}}`)

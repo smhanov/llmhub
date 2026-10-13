@@ -318,6 +318,8 @@ Each provider reads the shared functional options:
 - `WithResponseModalities` – control output modalities (e.g. `"IMAGE"` for Gemini image generation).
 - `WithCost` – set per-million-token pricing for cost accounting.
 - `WithRetryOnStatus` – override HTTP retry for a status (`WithRetryOnStatus(429, false)` surfaces rate limits immediately).
+- `WithPromptCache` – turn prompt caching on/off (enabled by default; see [Prompt Caching](#prompt-caching)).
+- `WithCacheKey` – set a stable per-conversation prompt cache key (see [Prompt Caching](#prompt-caching)).
 
 > [!WARNING]
 > Prefer not to use `WithMaxTokens` in normal application code. Provider defaults usually produce more complete answers, while an explicit cap that is too low commonly causes cut-off output.
@@ -405,6 +407,89 @@ resp, _ := client.Generate(ctx, prompt,
     llmhub.WithCost(0.15, 0.60),
 )
 ```
+
+## Prompt Caching
+
+Prompt caching is **enabled by default**. llmhub emits whatever top-level
+cache-enabling fields the destination provider understands, so repeated
+prompts (system messages, tool definitions, long conversation history) are
+served from the provider cache at a steep discount. Cache reads show up in
+`Usage.CacheReadTokens` / `Usage.CacheCreationTokens` on every response.
+
+| Provider  | Default behavior                        | What llmhub sends                                                                                             |
+| --------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| OpenAI    | Automatic caching, billed; disabled by explicit opt-out | `prompt_cache_key` when `WithCacheKey` is set (routing hint); `prompt_cache_options {"mode":"explicit"}` when opted out       |
+| Anthropic | Automatic caching via ephemeral marker  | Top-level `cache_control: {"type":"ephemeral"}` — the system places/advances breakpoints                        |
+| xAI (Grok)| Automatic caching                       | `x-grok-conv-id` request header when `WithCacheKey` is set (plus the harmless `prompt_cache_key` body field)   |
+| OpenRouter| Vendor-dependent                        | `prompt_cache_key` when `WithCacheKey` is set — OpenRouter pins sticky provider routing to it from request 1   |
+| Z.AI      | Automatic server-side caching           | `prompt_cache_key` body field when `WithCacheKey` is set (tolerated)                                            |
+| Gemini    | Implicit caching (2.5+ models)          | Nothing to send; `WithPromptCache(false)` is a documented no-op on this lane                                    |
+| Ollama    | Local inference caching                 | Nothing to send; `WithPromptCache(false)` is a no-op                                                            |
+
+### Opting Out
+
+Pass `WithPromptCache(false)` to disable caching on every lane:
+
+```go
+client, _ := llmhub.New("anthropic", apiKey,
+    llmhub.WithModel("claude-3-haiku-20240307"),
+    llmhub.WithPromptCache(false), // no cache_control, no prompt_cache_key
+)
+```
+
+Opting out is consistent across providers:
+
+- **Anthropic**: the automatic-caching marker is omitted, so nothing is cached.
+- **OpenAI**: the native provider renders `prompt_cache_options
+  {"mode":"explicit"}`, which turns off OpenAI's server-side automatic caching
+  for the request. This matters for billing: OpenAI charges cache writes at
+  1.25x input price on GPT-5.6+ models whether or not the cached prefix is
+  ever read again, so a prompt of 1024+ tokens sent once costs more with
+  caching on than off.
+
+```go
+client, _ := llmhub.New("openai", apiKey,
+    llmhub.WithModel("gpt-5.6"),
+    llmhub.WithPromptCache(false), // sends prompt_cache_options {"mode":"explicit"}
+)
+```
+
+> [!WARNING]
+> Cache writes cost extra: Anthropic bills 1.25x on written tokens (5-minute
+> TTL; 2x with the 1-hour TTL) and OpenAI bills 1.25x on GPT-5.6+ even for
+> automatic caching, while cache reads run 0.1x–0.5x of the normal input
+> price. One-shot workloads that send large unique prompts once and never
+> reuse them should pass `WithPromptCache(false)`. Multi-turn agents should
+> keep caching on.
+
+When routing to OpenAI models **through OpenRouter**, the openrouter provider
+does not emit OpenAI's control (it is OpenAI-specific vocabulary). Use the
+`WithExtraBody` escape hatch there — an explicit `prompt_cache_options`
+always wins over anything llmhub generates:
+
+```go
+llmhub.WithExtraBody(map[string]json.RawMessage{
+    "prompt_cache_options": json.RawMessage(`{"mode":"explicit"}`),
+})
+```
+
+### Cache Keys
+
+`WithCacheKey` supplies a stable per-conversation key for providers that
+route cached requests:
+
+```go
+client, _ := llmhub.New("openrouter", apiKey,
+    llmhub.WithModel("x-ai/grok-4.5"),
+    llmhub.WithCacheKey("conversation-123"), // sticky routing from request 1
+)
+```
+
+On OpenRouter this pins multi-turn agents to the same provider from the
+first request of a conversation; on OpenAI it improves routing to the same
+cache shard; on xAI it is also sent as the `x-grok-conv-id` header. Leave it
+unset to rely on provider-automatic caching (OpenRouter falls back to
+message-hash sticky routing after the first successful request).
 
 ## Web Search / Grounding
 
@@ -593,6 +678,8 @@ go run ./examples/cli [options]
 | `-stream`      | Enable streaming mode                                                                       |
 | `-temperature` | Sampling temperature (default: 0.7)                                                         |
 | `-max-tokens`  | Hard cap on generated tokens; leave unset unless needed to avoid truncation                 |
+| `-no-cache`    | Disable prompt caching (caching is enabled by default)                                      |
+| `-cache-key`   | Stable per-conversation cache key (`prompt_cache_key`; `x-grok-conv-id` header on xAI)      |
 | `-input-cost`  | Cost per 1M input tokens in USD (for cost accounting)                                       |
 | `-output-cost` | Cost per 1M output tokens in USD (for cost accounting)                                      |
 | `-timeout`     | Request timeout duration (e.g. `30s`, `2m`, `10m`)                                           |

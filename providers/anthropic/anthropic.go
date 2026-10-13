@@ -325,6 +325,14 @@ func buildRequestPayload(prompt []*llmhub.Message, cfg llmhub.Config, stream boo
 		}
 		req.OutputConfig = &anthropicOutputConfig{Effort: effort}
 	}
+	// Prompt caching is enabled by default: the top-level ephemeral
+	// marker opts the request into Anthropic automatic caching, where the
+	// system places and advances cache breakpoints. WithPromptCache(false)
+	// omits it; the CacheKey is not rendered on this lane because
+	// Anthropic has no per-request cache-key field.
+	if cfg.PromptCacheEnabled() {
+		req.CacheControl = &anthropicCacheControl{Type: "ephemeral"}
+	}
 	if len(cfg.Tools) > 0 {
 		req.Tools = convertTools(cfg.Tools)
 	}
@@ -547,6 +555,17 @@ type anthropicRequest struct {
 	Tools        []anthropicTool        `json:"tools,omitempty"`
 	ToolChoice   *anthropicToolChoice   `json:"tool_choice,omitempty"`
 	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
+	// CacheControl enables Anthropic automatic prompt caching via the
+	// top-level ephemeral marker: the system places and advances cache
+	// breakpoints for multi-turn conversations. nil when prompt caching
+	// is disabled via WithPromptCache(false).
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+}
+
+// anthropicCacheControl carries the Anthropic cache_control marker. The
+// "ephemeral" type enables automatic caching with the default 5-minute TTL.
+type anthropicCacheControl struct {
+	Type string `json:"type"`
 }
 
 // anthropicOutputConfig carries the effort control for adaptive thinking

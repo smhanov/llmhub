@@ -245,6 +245,223 @@ func TestBuildRequestPayload_ThinkingLevel(t *testing.T) {
 	}
 }
 
+func TestBuildRequestPayload_PromptCacheKey(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hello world")),
+	}
+
+	// Case 1: default config with no cache key - the field is absent so
+	// providers fall back to automatic caching.
+	defaultCfg := llmhub.NewConfig(llmhub.WithModel("gpt-4o"))
+	payload, err := BuildRequestPayload(prompt, defaultCfg, false)
+	if err != nil {
+		t.Fatalf("BuildRequestPayload failed: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if _, ok := decoded["prompt_cache_key"]; ok {
+		t.Fatalf("prompt_cache_key must be absent when no cache key is set, got %s", string(decoded["prompt_cache_key"]))
+	}
+
+	// Case 2: WithCacheKey renders the top-level prompt_cache_key field.
+	keyedCfg := llmhub.NewConfig(
+		llmhub.WithModel("gpt-4o"),
+		llmhub.WithCacheKey("conv-1"),
+	)
+	payload, err = BuildRequestPayload(prompt, keyedCfg, false)
+	if err != nil {
+		t.Fatalf("BuildRequestPayload failed: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if string(decoded["prompt_cache_key"]) != `"conv-1"` {
+		t.Fatalf("expected prompt_cache_key 'conv-1', got %s", string(decoded["prompt_cache_key"]))
+	}
+
+	// Case 3: WithPromptCache(false) suppresses the field even when a
+	// cache key is also set.
+	optOutCfg := llmhub.NewConfig(
+		llmhub.WithModel("gpt-4o"),
+		llmhub.WithCacheKey("conv-1"),
+		llmhub.WithPromptCache(false),
+	)
+	payload, err = BuildRequestPayload(prompt, optOutCfg, false)
+	if err != nil {
+		t.Fatalf("BuildRequestPayload failed: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if _, ok := decoded["prompt_cache_key"]; ok {
+		t.Fatalf("prompt_cache_key must be absent when prompt caching is disabled, got %s", string(decoded["prompt_cache_key"]))
+	}
+}
+
+func TestClientGenerate_CacheKeyHeader(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	}
+
+	newServer := func(header *http.Header) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			*header = r.Header.Clone()
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"id":"chatcmpl-cache","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+		}))
+	}
+
+	// With a cache key: the provider-declared header carries it.
+	var keyedHeader http.Header
+	keyedServer := newServer(&keyedHeader)
+	defer keyedServer.Close()
+	keyedClient := NewClient(ClientConfig{
+		ProviderName:   "test-provider",
+		CacheKeyHeader: "x-grok-conv-id",
+		BaseConfig: llmhub.NewConfig(
+			llmhub.WithBaseURL(keyedServer.URL),
+			llmhub.WithHTTPClient(keyedServer.Client()),
+			llmhub.WithAPIKey("test-key"),
+			llmhub.WithModel("test-model"),
+			llmhub.WithCacheKey("conv-1"),
+		),
+	})
+	if _, err := keyedClient.Generate(context.Background(), prompt); err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if got := keyedHeader.Get("x-grok-conv-id"); got != "conv-1" {
+		t.Fatalf("expected x-grok-conv-id 'conv-1', got %q", got)
+	}
+
+	// Without a cache key: the header is absent.
+	var emptyHeader http.Header
+	emptyServer := newServer(&emptyHeader)
+	defer emptyServer.Close()
+	emptyClient := NewClient(ClientConfig{
+		ProviderName:   "test-provider",
+		CacheKeyHeader: "x-grok-conv-id",
+		BaseConfig: llmhub.NewConfig(
+			llmhub.WithBaseURL(emptyServer.URL),
+			llmhub.WithHTTPClient(emptyServer.Client()),
+			llmhub.WithAPIKey("test-key"),
+			llmhub.WithModel("test-model"),
+		),
+	})
+	if _, err := emptyClient.Generate(context.Background(), prompt); err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if got := emptyHeader.Get("x-grok-conv-id"); got != "" {
+		t.Fatalf("expected no x-grok-conv-id without a cache key, got %q", got)
+	}
+
+	// With prompt caching disabled: the header is absent even when a
+	// cache key is set.
+	var optOutHeader http.Header
+	optOutServer := newServer(&optOutHeader)
+	defer optOutServer.Close()
+	optOutClient := NewClient(ClientConfig{
+		ProviderName:   "test-provider",
+		CacheKeyHeader: "x-grok-conv-id",
+		BaseConfig: llmhub.NewConfig(
+			llmhub.WithBaseURL(optOutServer.URL),
+			llmhub.WithHTTPClient(optOutServer.Client()),
+			llmhub.WithAPIKey("test-key"),
+			llmhub.WithModel("test-model"),
+			llmhub.WithCacheKey("conv-1"),
+			llmhub.WithPromptCache(false),
+		),
+	})
+	if _, err := optOutClient.Generate(context.Background(), prompt); err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if got := optOutHeader.Get("x-grok-conv-id"); got != "" {
+		t.Fatalf("expected no x-grok-conv-id when caching is disabled, got %q", got)
+	}
+}
+
+func TestClientGenerate_PromptCacheDisable(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	}
+
+	newClient := func(supportsDisable bool, extraOpts ...llmhub.Option) (*Client, *map[string]json.RawMessage, *httptest.Server) {
+		var received map[string]json.RawMessage
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			data, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(data, &received)
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"id":"chatcmpl-cache-off","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+		}))
+		opts := append([]llmhub.Option{
+			llmhub.WithBaseURL(server.URL),
+			llmhub.WithHTTPClient(server.Client()),
+			llmhub.WithAPIKey("test-key"),
+			llmhub.WithModel("test-model"),
+		}, extraOpts...)
+		client := NewClient(ClientConfig{
+			ProviderName:         "test-provider",
+			SupportsCacheDisable: supportsDisable,
+			BaseConfig:           llmhub.NewConfig(opts...),
+		})
+		return client, &received, server
+	}
+
+	// Case 1: capability + WithPromptCache(false) -> the explicit mode is
+	// rendered and no cache key is sent.
+	client, received, server := newClient(true, llmhub.WithPromptCache(false))
+	defer server.Close()
+	if _, err := client.Generate(context.Background(), prompt); err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if string((*received)["prompt_cache_options"]) != `{"mode":"explicit"}` {
+		t.Fatalf("expected prompt_cache_options explicit mode, got %s", string((*received)["prompt_cache_options"]))
+	}
+	if _, ok := (*received)["prompt_cache_key"]; ok {
+		t.Fatalf("prompt_cache_key must be absent when caching is disabled")
+	}
+
+	// Case 2: no capability + WithPromptCache(false) -> nothing rendered
+	// (xai/zai/openrouter lanes unchanged).
+	client, received, server = newClient(false, llmhub.WithPromptCache(false))
+	defer server.Close()
+	if _, err := client.Generate(context.Background(), prompt); err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if _, ok := (*received)["prompt_cache_options"]; ok {
+		t.Fatalf("prompt_cache_options must be absent without the capability")
+	}
+
+	// Case 3: capability + caching enabled (default) -> nothing rendered.
+	client, received, server = newClient(true)
+	defer server.Close()
+	if _, err := client.Generate(context.Background(), prompt); err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if _, ok := (*received)["prompt_cache_options"]; ok {
+		t.Fatalf("prompt_cache_options must be absent when caching is enabled")
+	}
+
+	// Case 4: capability + opt-out + explicit ExtraBody override ->
+	// the caller-supplied value wins on collision.
+	client, received, server = newClient(true,
+		llmhub.WithPromptCache(false),
+		llmhub.WithExtraBody(map[string]json.RawMessage{
+			"prompt_cache_options": json.RawMessage(`{"mode":"custom"}`),
+		}),
+	)
+	defer server.Close()
+	if _, err := client.Generate(context.Background(), prompt); err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if string((*received)["prompt_cache_options"]) != `{"mode":"custom"}` {
+		t.Fatalf("expected ExtraBody prompt_cache_options to win, got %s", string((*received)["prompt_cache_options"]))
+	}
+}
+
 func TestClientGenerate_WithExtraBody(t *testing.T) {
 	var receivedBody map[string]json.RawMessage
 

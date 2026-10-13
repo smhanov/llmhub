@@ -60,9 +60,15 @@ func New(apiKey string, opts ...llmhub.Option) (llmhub.Provider, error) {
 	}
 	return &Client{
 		chat: openaichat.NewClient(openaichat.ClientConfig{
-			ProviderName:          providerName,
-			BaseConfig:            cfg,
-			NormalizeBaseURL:      openaichat.EnsureV1Suffix,
+			ProviderName:     providerName,
+			BaseConfig:       cfg,
+			NormalizeBaseURL: openaichat.EnsureV1Suffix,
+			// OpenAI caches automatically server-side and bills cache
+			// writes on GPT-5.6+ even without opt-in, so declaring the
+			// control lets WithPromptCache(false) render
+			// prompt_cache_options {"mode":"explicit"} and turn caching
+			// (and its billing) off for real.
+			SupportsCacheDisable:  true,
 			AuthHeaderAfterCustom: false,
 		}),
 	}, nil

@@ -87,8 +87,12 @@ func New(apiKey string, opts ...llmhub.Option) (llmhub.Provider, error) {
 	}
 	return &Client{
 		chat: openaichat.NewClient(openaichat.ClientConfig{
-			ProviderName:          providerName,
-			BaseConfig:            cfg,
+			ProviderName: providerName,
+			BaseConfig:   cfg,
+			// CacheKeyHeader: xAI Grok caching is automatic, but the
+			// x-grok-conv-id request header maximizes the Chat
+			// Completions cache hit rate for a conversation.
+			CacheKeyHeader:        "x-grok-conv-id",
 			NormalizeBaseURL:      openaichat.EnsureV1Suffix,
 			AuthHeaderAfterCustom: true,
 		}),

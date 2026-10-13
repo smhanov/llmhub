@@ -99,6 +99,71 @@ func TestAnthropicGenerateThinkingLevel(t *testing.T) {
 	}
 }
 
+func TestBuildRequestPayload_PromptCacheControl(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	}
+
+	// Case 1: default config - the automatic caching marker is present.
+	payload, err := buildRequestPayload(prompt, llmhub.NewConfig(llmhub.WithModel("claude-test")), false)
+	if err != nil {
+		t.Fatalf("buildRequestPayload failed: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	var cacheControl struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(decoded["cache_control"], &cacheControl); err != nil {
+		t.Fatalf("unmarshal cache_control failed: %v", err)
+	}
+	if cacheControl.Type != "ephemeral" {
+		t.Fatalf("expected cache_control {\"type\":\"ephemeral\"}, got %s", string(decoded["cache_control"]))
+	}
+
+	// Case 2: WithPromptCache(false) - the marker is absent.
+	optOutCfg := llmhub.NewConfig(
+		llmhub.WithModel("claude-test"),
+		llmhub.WithPromptCache(false),
+	)
+	payload, err = buildRequestPayload(prompt, optOutCfg, false)
+	if err != nil {
+		t.Fatalf("buildRequestPayload failed: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if _, ok := decoded["cache_control"]; ok {
+		t.Fatalf("cache_control must be absent when prompt caching is disabled, got %s", string(decoded["cache_control"]))
+	}
+
+	// Case 3: opt-out with a cache key set - the marker stays absent and
+	// the CacheKey is not rendered on this lane (Anthropic has no
+	// per-request cache-key field).
+	optOutKeyedCfg := llmhub.NewConfig(
+		llmhub.WithModel("claude-test"),
+		llmhub.WithCacheKey("conv-1"),
+		llmhub.WithPromptCache(false),
+	)
+	payload, err = buildRequestPayload(prompt, optOutKeyedCfg, false)
+	if err != nil {
+		t.Fatalf("buildRequestPayload failed: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if _, ok := decoded["cache_control"]; ok {
+		t.Fatalf("cache_control must be absent when prompt caching is disabled, got %s", string(decoded["cache_control"]))
+	}
+	if _, ok := decoded["prompt_cache_key"]; ok {
+		t.Fatalf("prompt_cache_key must never be rendered on the anthropic lane, got %s", string(decoded["prompt_cache_key"]))
+	}
+}
+
 func TestAnthropicGenerateWithCost(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"id":"msg","content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":5,"output_tokens":7,"cost":0.0002}}`)
