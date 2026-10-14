@@ -592,9 +592,10 @@ type generationConfig struct {
 	ThinkingConfig     *thinkingConfig `json:"thinkingConfig,omitempty"`
 }
 
-// thinkingConfig carries the Gemini 3+ thinking level. The deprecated
-// thinking_budget fallback and custom sampling parameters (temperature,
-// top_p, top_k) are intentionally not sent.
+// thinkingConfig carries the Gemini 3.x+/4.x thinkingLevel; 2.5-series
+// models don't support it (upstream 400) and the deprecated, mutually
+// exclusive thinkingBudget is intentionally not sent. Custom sampling
+// parameters (temperature, top_p, top_k) are also intentionally not sent.
 type thinkingConfig struct {
 	ThinkingLevel string `json:"thinkingLevel,omitempty"`
 }

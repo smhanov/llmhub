@@ -121,12 +121,14 @@ client, _ := llmhub.New("openai", apiKey,
 )
 ```
 
-| Level | Gemini | OpenAI / xAI / OpenRouter / ZAI | Anthropic (4.6+) | Ollama |
+| Level | Gemini (3.x+) | OpenAI / xAI / OpenRouter / ZAI | Anthropic (4.6+) | Ollama |
 | --- | --- | --- | --- | --- |
 | unset | omit | omit | omit | omit |
 | `minimal` | `minimal` | `reasoning_effort: minimal` | `low` | `think: false` |
 | `low` / `medium` / `high` | 1:1 | 1:1 | 1:1 (`output_config.effort`) | `think: "low"` / `"medium"` / `"high"` |
 | `xhigh` | `high` (clamp) | `xhigh` | `xhigh` | `think: "high"` (clamp) |
+
+Gemini 2.5-series models do not accept `thinkingLevel` — they use the deprecated `thinkingBudget` control, which llmhub does not send — so setting `ThinkingLevel` on a 2.5 model returns upstream HTTP 400 "Thinking level is not supported for this model."; leave `ThinkingLevel` unset for the 2.5 series. Level support also varies within 3.x/4.x: `minimal` is rejected by gemini-3.8-flash and gemini-4-argon, and some models accept only a subset of levels (gemini-3-pro-preview accepts only `low` and `high`). See the Gemini thinking docs (`https://ai.google.dev/gemini-api/docs/generate-content/thinking`) for the per-model table.
 
 ## Tool Calling
 

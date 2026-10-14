@@ -45,6 +45,7 @@ type Config struct {
 	// ThinkingLevel controls reasoning depth across providers (see the
 	// ThinkingLevel type for the per-provider mapping). Leave empty for the
 	// model default. Providers without a native thinking control ignore it.
+	// On Gemini this requires a 3.x+ model (see ThinkingLevel).
 	ThinkingLevel ThinkingLevel
 
 	// DisablePromptCache turns off prompt caching, which is enabled by
@@ -281,7 +282,8 @@ func WithResponseModalities(modalities ...string) Option {
 // WithThinkingLevel sets the reasoning depth ("minimal", "low", "medium",
 // "high", "xhigh"). Leave unset to use the model default. Each provider
 // maps it to its native thinking/effort control (see ThinkingLevel);
-// providers without one ignore it.
+// providers without one ignore it. On Gemini this requires a 3.x+ model
+// (see ThinkingLevel).
 func WithThinkingLevel(level ThinkingLevel) Option {
 	return func(c *Config) {
 		c.ThinkingLevel = level

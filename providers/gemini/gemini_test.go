@@ -46,13 +46,16 @@ func TestGeminiGenerate(t *testing.T) {
 
 func TestGeminiGenerateThinkingLevel(t *testing.T) {
 	cases := []struct {
-		name  string
-		level llmhub.ThinkingLevel
-		want  string
+		name    string
+		level   llmhub.ThinkingLevel
+		wantNil bool
+		want    string
 	}{
 		{name: "high", level: llmhub.ThinkingLevelHigh, want: "high"},
 		{name: "xhigh clamps to high", level: llmhub.ThinkingLevelXHigh, want: "high"},
 		{name: "low", level: llmhub.ThinkingLevelLow, want: "low"},
+		{name: "minimal passes through", level: llmhub.ThinkingLevelMinimal, want: "minimal"},
+		{name: "unset omits thinkingConfig", wantNil: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,7 +66,11 @@ func TestGeminiGenerateThinkingLevel(t *testing.T) {
 				if err := json.Unmarshal(body, &req); err != nil {
 					t.Fatalf("decode request: %v", err)
 				}
-				if req.GenerationConfig == nil || req.GenerationConfig.ThinkingConfig == nil ||
+				if tc.wantNil {
+					if req.GenerationConfig != nil && req.GenerationConfig.ThinkingConfig != nil {
+						t.Fatalf("thinkingConfig must be absent when ThinkingLevel is unset, got %+v", req.GenerationConfig)
+					}
+				} else if req.GenerationConfig == nil || req.GenerationConfig.ThinkingConfig == nil ||
 					req.GenerationConfig.ThinkingConfig.ThinkingLevel != tc.want {
 					t.Fatalf("expected thinkingLevel %q, got %+v", tc.want, req.GenerationConfig)
 				}
@@ -71,11 +78,12 @@ func TestGeminiGenerateThinkingLevel(t *testing.T) {
 			}))
 			defer server.Close()
 
-			provider, err := New("secret",
-				llmhub.WithBaseURL(server.URL),
-				llmhub.WithModel("flash-test"),
-				llmhub.WithThinkingLevel(tc.level),
-			)
+			var opts []llmhub.Option
+			opts = append(opts, llmhub.WithBaseURL(server.URL), llmhub.WithModel("flash-test"))
+			if tc.level != "" {
+				opts = append(opts, llmhub.WithThinkingLevel(tc.level))
+			}
+			provider, err := New("secret", opts...)
 			if err != nil {
 				t.Fatalf("provider new: %v", err)
 			}

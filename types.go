@@ -136,8 +136,12 @@ type ToolChoice struct {
 //
 // Per-provider mapping:
 //
-//	Gemini:     generationConfig.thinkingConfig.thinkingLevel
-//	            (minimal/low/medium/high; xhigh is clamped to high)
+//	Gemini:     maps to generationConfig.thinkingConfig.thinkingLevel on
+//	            Gemini 3.x+ and 4.x models only (minimal/low/medium/high;
+//	            xhigh is clamped to high). 2.5-series models reject
+//	            thinkingLevel (they use the deprecated thinkingBudget
+//	            control, not sent by llmhub), and minimal itself is
+//	            rejected by some 3.x models (e.g. gemini-3.8-flash)
 //	OpenAI-lane (openai, xai, openrouter, zai): top-level reasoning_effort
 //	            (minimal/low/medium/high/xhigh, model-dependent)
 //	Anthropic:  output_config.effort, modern adaptive path, requires a
