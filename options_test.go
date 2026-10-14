@@ -11,8 +11,8 @@ import (
 
 func TestNewConfigDefaults(t *testing.T) {
 	cfg := NewConfig()
-	if cfg.Temperature != defaultTemperature {
-		t.Fatalf("expected default temperature %v got %v", defaultTemperature, cfg.Temperature)
+	if cfg.Temperature != nil {
+		t.Fatalf("expected temperature to be unset by default, got %v", *cfg.Temperature)
 	}
 	if cfg.Headers == nil {
 		t.Fatalf("headers map should be initialized")
@@ -28,7 +28,7 @@ func TestWithOptions(t *testing.T) {
 		WithBaseURL("http://localhost"),
 		WithCost(2.50, 10.0),
 	)
-	if cfg.Model != "test-model" || cfg.Temperature != 0.5 || cfg.MaxTokens != 123 || cfg.APIKey != "abc" || cfg.BaseURL != "http://localhost" {
+	if cfg.Model != "test-model" || cfg.Temperature == nil || *cfg.Temperature != 0.5 || cfg.MaxTokens != 123 || cfg.APIKey != "abc" || cfg.BaseURL != "http://localhost" {
 		t.Fatalf("option application failed: %+v", cfg)
 	}
 	if cfg.InputCostPerMillionTokens != 2.50 {
@@ -36,6 +36,25 @@ func TestWithOptions(t *testing.T) {
 	}
 	if cfg.OutputCostPerMillionTokens != 10.0 {
 		t.Fatalf("expected output cost 10.0, got %v", cfg.OutputCostPerMillionTokens)
+	}
+}
+
+func TestWithTemperatureZeroAndCloneIsolation(t *testing.T) {
+	cfg := NewConfig(WithTemperature(0))
+	if cfg.Temperature == nil {
+		t.Fatal("explicit WithTemperature(0) must leave a non-nil pointer")
+	}
+	if *cfg.Temperature != 0 {
+		t.Fatalf("expected temperature 0, got %v", *cfg.Temperature)
+	}
+
+	clone := cfg.Clone()
+	if clone.Temperature == nil || *clone.Temperature != 0 {
+		t.Fatalf("clone should preserve temperature, got %+v", clone.Temperature)
+	}
+	*clone.Temperature = 0.9
+	if *cfg.Temperature != 0 {
+		t.Fatalf("clone mutation leaked into original temperature")
 	}
 }
 

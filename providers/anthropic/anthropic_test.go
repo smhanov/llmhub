@@ -164,6 +164,67 @@ func TestBuildRequestPayload_PromptCacheControl(t *testing.T) {
 	}
 }
 
+func TestBuildRequestPayload_Temperature(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	}
+
+	// Case 1: unset temperature - the field is absent from the payload.
+	payload, err := buildRequestPayload(prompt, llmhub.NewConfig(llmhub.WithModel("claude-test")), false)
+	if err != nil {
+		t.Fatalf("buildRequestPayload failed: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if _, ok := decoded["temperature"]; ok {
+		t.Fatalf("temperature must be absent when unset, got %s", string(decoded["temperature"]))
+	}
+
+	// Case 2: explicit value - rendered verbatim.
+	cfg := llmhub.NewConfig(
+		llmhub.WithModel("claude-test"),
+		llmhub.WithTemperature(0.5),
+	)
+	payload, err = buildRequestPayload(prompt, cfg, false)
+	if err != nil {
+		t.Fatalf("buildRequestPayload failed: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	var temp float64
+	if err := json.Unmarshal(decoded["temperature"], &temp); err != nil {
+		t.Fatalf("unmarshal temperature failed: %v", err)
+	}
+	if temp != 0.5 {
+		t.Fatalf("expected temperature 0.5, got %v", temp)
+	}
+
+	// Case 3: explicit zero - present as 0, not omitted.
+	zeroCfg := llmhub.NewConfig(
+		llmhub.WithModel("claude-test"),
+		llmhub.WithTemperature(0),
+	)
+	payload, err = buildRequestPayload(prompt, zeroCfg, false)
+	if err != nil {
+		t.Fatalf("buildRequestPayload failed: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	raw, ok := decoded["temperature"]
+	if !ok {
+		t.Fatal("explicit WithTemperature(0) must render temperature on the wire")
+	}
+	if string(raw) != "0" {
+		t.Fatalf("expected temperature 0, got %s", string(raw))
+	}
+}
+
 func TestAnthropicGenerateWithCost(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"id":"msg","content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":5,"output_tokens":7,"cost":0.0002}}`)

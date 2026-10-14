@@ -170,6 +170,104 @@ func TestOllamaGenerateToolCalls(t *testing.T) {
 	}
 }
 
+func TestBuildChatRequest_Temperature(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("ping")),
+	}
+
+	// Case 1: unset temperature - Options has no temperature key.
+	payload, err := buildChatRequest(prompt, llmhub.NewConfig(llmhub.WithModel("local")), false)
+	if err != nil {
+		t.Fatalf("buildChatRequest failed: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	var options map[string]interface{}
+	if len(decoded["options"]) > 0 {
+		if err := json.Unmarshal(decoded["options"], &options); err != nil {
+			t.Fatalf("unmarshal options failed: %v", err)
+		}
+	}
+	if _, ok := options["temperature"]; ok {
+		t.Fatalf("temperature must be absent when unset, got %v", options["temperature"])
+	}
+
+	// Case 2: explicit zero - present as 0, not omitted.
+	zeroCfg := llmhub.NewConfig(
+		llmhub.WithModel("local"),
+		llmhub.WithTemperature(0),
+	)
+	payload, err = buildChatRequest(prompt, zeroCfg, false)
+	if err != nil {
+		t.Fatalf("buildChatRequest failed: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	options = nil
+	if err := json.Unmarshal(decoded["options"], &options); err != nil {
+		t.Fatalf("unmarshal options failed: %v", err)
+	}
+	temp, ok := options["temperature"].(float64)
+	if !ok {
+		t.Fatalf("expected temperature 0 in options, got %v", options["temperature"])
+	}
+	if temp != 0 {
+		t.Fatalf("expected temperature 0, got %v", temp)
+	}
+
+	// Case 3: explicit value - rendered verbatim.
+	cfg := llmhub.NewConfig(
+		llmhub.WithModel("local"),
+		llmhub.WithTemperature(0.5),
+	)
+	payload, err = buildChatRequest(prompt, cfg, false)
+	if err != nil {
+		t.Fatalf("buildChatRequest failed: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	options = nil
+	if err := json.Unmarshal(decoded["options"], &options); err != nil {
+		t.Fatalf("unmarshal options failed: %v", err)
+	}
+	temp, ok = options["temperature"].(float64)
+	if !ok || temp != 0.5 {
+		t.Fatalf("expected temperature 0.5, got %v", options["temperature"])
+	}
+
+	// Case 4: MaxTokens-only config still renders num_predict without a
+	// temperature key.
+	maxTokensCfg := llmhub.NewConfig(
+		llmhub.WithModel("local"),
+		llmhub.WithMaxTokens(42),
+	)
+	payload, err = buildChatRequest(prompt, maxTokensCfg, false)
+	if err != nil {
+		t.Fatalf("buildChatRequest failed: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	options = nil
+	if err := json.Unmarshal(decoded["options"], &options); err != nil {
+		t.Fatalf("unmarshal options failed: %v", err)
+	}
+	numPredict, ok := options["num_predict"].(float64)
+	if !ok || numPredict != 42 {
+		t.Fatalf("expected num_predict 42, got %v", options["num_predict"])
+	}
+	if _, ok := options["temperature"]; ok {
+		t.Fatalf("temperature must be absent for MaxTokens-only config, got %v", options["temperature"])
+	}
+}
+
 func TestOllamaStreamHTTPErrorIsSynchronous(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

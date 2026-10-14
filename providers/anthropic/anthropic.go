@@ -309,11 +309,13 @@ func buildRequestPayload(prompt []*llmhub.Message, cfg llmhub.Config, stream boo
 		messages = append(messages, converted)
 	}
 	req := anthropicRequest{
-		Model:       cfg.Model,
-		Messages:    messages,
-		MaxTokens:   cfg.MaxTokens,
-		Temperature: cfg.Temperature,
-		Stream:      stream,
+		Model:     cfg.Model,
+		Messages:  messages,
+		MaxTokens: cfg.MaxTokens,
+		Stream:    stream,
+	}
+	if cfg.Temperature != nil {
+		req.Temperature = cfg.Temperature
 	}
 	// ThinkingLevel maps to the modern output_config.effort control
 	// (adaptive thinking, requires a 4.6+ model). Anthropic has no minimal
@@ -550,7 +552,7 @@ type anthropicRequest struct {
 	Messages     []anthropicMessage     `json:"messages"`
 	System       string                 `json:"system,omitempty"`
 	MaxTokens    int                    `json:"max_tokens"`
-	Temperature  float64                `json:"temperature,omitempty"`
+	Temperature  *float64               `json:"temperature,omitempty"`
 	Stream       bool                   `json:"stream,omitempty"`
 	Tools        []anthropicTool        `json:"tools,omitempty"`
 	ToolChoice   *anthropicToolChoice   `json:"tool_choice,omitempty"`

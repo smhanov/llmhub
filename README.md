@@ -311,7 +311,7 @@ Each provider reads the shared functional options:
 - `WithAPIKey` – supply SaaS credentials (`openai`, `anthropic`, `gemini`, `xai`, `openrouter`, `zai`).
 - `WithTokenSource` – supply an OAuth / dynamic token source (`xai`).
 - `WithBaseURL` – point to proxies/self-hosted gateways.
-- `WithModel`, `WithTemperature` – customize LLM behavior per call. Often it is best to omit and go with the defaults.
+- `WithModel`, `WithTemperature` – customize LLM behavior per call. `WithTemperature` is unset by default: no temperature is sent and the provider's own default applies — often it is best to keep it that way. Calling `WithTemperature(x)` sends `x` verbatim, including `0`. Note that some models (e.g. recent Anthropic ones) reject the field entirely, so omit `WithTemperature` when targeting them.
 - `WithMaxTokens` – only set this when you truly need a hard output cap; otherwise leave it unset to reduce the risk of truncated responses.
 - `WithWebSearch` – enable web search/grounding (Gemini: `google_search` tool).
 - `WithTools`, `WithToolChoice` – enable user-defined tool calling.

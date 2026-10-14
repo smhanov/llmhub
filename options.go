@@ -9,8 +9,13 @@ import (
 
 // Config captures all tunable request options shared across providers.
 type Config struct {
-	Model       string
-	Temperature float64
+	Model string
+	// Temperature is the sampling temperature sent to the provider. nil
+	// (the zero value) means unset: nothing is sent on the wire and the
+	// provider's own default applies. When set, including to 0, that exact
+	// value is sent. Leave nil unless you specifically need a custom value;
+	// some models (e.g. recent Anthropic ones) reject the field entirely.
+	Temperature *float64
 	// MaxTokens applies a hard cap to generated output tokens.
 	// Leave this unset unless you specifically need that cap, because values
 	// that are too low can cause the model to return truncated output.
@@ -66,14 +71,11 @@ type Config struct {
 // Option mutates a Config in a functional-options friendly way.
 type Option func(*Config)
 
-const defaultTemperature = 0.7
-
 // NewConfig produces a Config populated by the provided options.
 func NewConfig(opts ...Option) Config {
 	cfg := Config{
-		Temperature: defaultTemperature,
-		Headers:     map[string]string{},
-		ExtraBody:   map[string]json.RawMessage{},
+		Headers:   map[string]string{},
+		ExtraBody: map[string]json.RawMessage{},
 	}
 	ApplyOptions(&cfg, opts...)
 	return cfg
@@ -123,6 +125,10 @@ func (c Config) Clone() Config {
 		choice := *c.ToolChoice
 		clone.ToolChoice = &choice
 	}
+	if c.Temperature != nil {
+		t := *c.Temperature
+		clone.Temperature = &t
+	}
 	if c.RetryOnStatus != nil {
 		clone.RetryOnStatus = make(map[int]bool, len(c.RetryOnStatus))
 		for k, v := range c.RetryOnStatus {
@@ -146,10 +152,14 @@ func WithModel(model string) Option {
 	}
 }
 
-// WithTemperature sets the sampling temperature.
+// WithTemperature sets the sampling temperature sent to the provider.
+// The value is sent verbatim, including 0. Leave it unset to omit the
+// field entirely and use the provider's default; some models (e.g.
+// recent Anthropic ones) reject the field, so omit for those.
 func WithTemperature(temp float64) Option {
 	return func(c *Config) {
-		c.Temperature = temp
+		t := temp
+		c.Temperature = &t
 	}
 }
 

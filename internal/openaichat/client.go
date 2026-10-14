@@ -481,11 +481,13 @@ func BuildRequestPayload(prompt []*llmhub.Message, cfg llmhub.Config, stream boo
 		messages = append(messages, converted)
 	}
 	req := CompletionRequest{
-		Model:       cfg.Model,
-		Messages:    messages,
-		Temperature: cfg.Temperature,
-		MaxTokens:   cfg.MaxTokens,
-		Stream:      stream,
+		Model:     cfg.Model,
+		Messages:  messages,
+		MaxTokens: cfg.MaxTokens,
+		Stream:    stream,
+	}
+	if cfg.Temperature != nil {
+		req.Temperature = cfg.Temperature
 	}
 	// ThinkingLevel maps to the OpenAI-style reasoning_effort control used
 	// by OpenAI reasoning models, Grok, and OpenRouter. Unset omits it.
@@ -798,7 +800,7 @@ func FirstNonEmpty(values ...string) string {
 type CompletionRequest struct {
 	Model         string         `json:"model"`
 	Messages      []ChatMessage  `json:"messages"`
-	Temperature   float64        `json:"temperature,omitempty"`
+	Temperature   *float64       `json:"temperature,omitempty"`
 	MaxTokens     int            `json:"max_tokens,omitempty"`
 	Stream        bool           `json:"stream,omitempty"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`

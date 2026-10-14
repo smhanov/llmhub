@@ -243,10 +243,10 @@ func buildChatRequest(prompt []*llmhub.Message, cfg llmhub.Config, stream bool) 
 	if len(cfg.Tools) > 0 {
 		req.Tools = convertTools(cfg.Tools)
 	}
-	if cfg.Temperature != 0 || cfg.MaxTokens != 0 {
+	if cfg.Temperature != nil || cfg.MaxTokens != 0 {
 		req.Options = map[string]interface{}{}
-		if cfg.Temperature != 0 {
-			req.Options["temperature"] = cfg.Temperature
+		if cfg.Temperature != nil {
+			req.Options["temperature"] = *cfg.Temperature
 		}
 		if cfg.MaxTokens != 0 {
 			req.Options["num_predict"] = cfg.MaxTokens
