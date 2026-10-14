@@ -530,3 +530,61 @@ type testRoundTripper struct {
 func (t *testRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.roundTrip(req)
 }
+
+// TestClientStreamHTTPTraceTTFB runs a full llmhub.New("openai") client
+// against an httptest SSE server and verifies the built-in timing telemetry:
+// FirstByte comes from httptrace, FirstToken from the first content chunk,
+// and Total from the terminal frame.
+func TestClientStreamHTTPTraceTTFB(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}]}\n\n")
+		flusher.Flush()
+		time.Sleep(10 * time.Millisecond)
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client, err := llmhub.New("openai", "key", llmhub.WithModel("m"), llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	stream, err := client.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	var final llmhub.StreamChunk
+	for chunk := range stream {
+		if chunk.Err != nil {
+			t.Fatalf("chunk error: %v", chunk.Err)
+		}
+		if chunk.Timing == nil {
+			t.Fatalf("chunk %q missing Timing", chunk.Delta)
+		}
+		if chunk.Done {
+			final = chunk
+			break
+		}
+	}
+	tm := final.Timing
+	if tm.FirstByte <= 0 {
+		t.Errorf("FirstByte = %v, want > 0 (httptrace not reported)", tm.FirstByte)
+	}
+	if tm.FirstToken <= 0 {
+		t.Errorf("FirstToken = %v, want > 0", tm.FirstToken)
+	}
+	if tm.FirstByte > tm.FirstToken {
+		t.Errorf("FirstByte = %v after FirstToken = %v; first byte must precede first token", tm.FirstByte, tm.FirstToken)
+	}
+	if tm.Total < tm.FirstToken {
+		t.Errorf("Total = %v < FirstToken = %v", tm.Total, tm.FirstToken)
+	}
+	if tm.Chunks != 1 {
+		t.Errorf("Chunks = %d, want 1", tm.Chunks)
+	}
+	if tm.Connected < 0 {
+		t.Errorf("Connected = %v is negative", tm.Connected)
+	}
+}

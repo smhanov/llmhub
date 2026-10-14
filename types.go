@@ -1,6 +1,9 @@
 package llmhub
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // Role represents the speaker for a given message.
 type Role string
@@ -201,7 +204,11 @@ type Response struct {
 	ID      string
 	Content []ContentPart
 	Usage   UsageMetadata
-	Raw     interface{}
+	// Timing carries built-in latency telemetry (Connected, FirstByte,
+	// Total) for non-streaming requests. It is nil only for providers
+	// invoked without the Client wrapper (direct Provider calls).
+	Timing *TimingMetrics
+	Raw    interface{}
 }
 
 // Text concatenates the textual segments of the response for the common use case where only text matters.
@@ -246,6 +253,36 @@ func (r *Response) ToolCalls() []*ToolCallContent {
 	return calls
 }
 
+// TimingMetrics captures built-in latency telemetry for a single request,
+// so consumer applications do not have to hand-roll timestamping and
+// chunk-tracking logic. All Duration fields are measured from StartedAt.
+// A zero duration always means "not available", never "instant".
+type TimingMetrics struct {
+	// StartedAt is the moment Stream or Generate was invoked.
+	StartedAt time.Time
+	// Connected is the time until the HTTP connection was established
+	// (httptrace GotConn), including any TLS handshake. With connection
+	// reuse it is near zero. Zero when the transport did not report it.
+	Connected time.Duration
+	// FirstByte is the time until the upstream sent its first response
+	// byte (httptrace GotFirstResponseByte). When the request was retried
+	// (e.g. on 429) it reflects the successful attempt. Zero when the
+	// transport did not report it.
+	FirstByte time.Duration
+	// FirstToken is the time until the first content-bearing stream chunk
+	// (text, reasoning, or tool-call delta) was delivered — the classic
+	// Time To First Token. Usage-only trailing frames do not count. Zero
+	// until a content chunk arrives.
+	FirstToken time.Duration
+	// Total is the full request/stream duration. It is set on the terminal
+	// stream chunk (Done or Err) and on Generate responses; it is zero on
+	// earlier chunks.
+	Total time.Duration
+	// Chunks is the number of content-bearing chunks observed so far. It
+	// grows on each content chunk and is final on the terminal chunk.
+	Chunks int
+}
+
 // StreamChunk represents a partial streaming response.
 type StreamChunk struct {
 	// ID is the upstream completion identifier when the provider reports one
@@ -265,6 +302,10 @@ type StreamChunk struct {
 	// reports no reason or the reason cannot be mapped. It is typically set on
 	// the final content frame (not on the terminal Done frame).
 	FinishReason string
-	Done         bool
-	Err          error
+	// Timing carries llmhub's built-in latency telemetry as a snapshot taken
+	// when this chunk was produced. It is nil only for providers invoked
+	// without the Client wrapper (direct Provider calls).
+	Timing *TimingMetrics
+	Done   bool
+	Err    error
 }

@@ -230,6 +230,11 @@ func main() {
 			if chunk.FinishReason != "" {
 				fmt.Fprintf(os.Stderr, "\n[finish_reason] %s\n", chunk.FinishReason)
 			}
+			if chunk.Done && chunk.Timing != nil {
+				tm := chunk.Timing
+				fmt.Fprintf(os.Stderr, "[timing] connected=%v first_byte=%v ttft=%v total=%v chunks=%d\n",
+					tm.Connected, tm.FirstByte, tm.FirstToken, tm.Total, tm.Chunks)
+			}
 			if chunk.Done {
 				break
 			}

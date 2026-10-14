@@ -22,16 +22,20 @@ func (c *Client) ProviderName() string {
 }
 
 // Generate performs a single request/response interaction with the provider.
+// The returned response carries built-in latency telemetry in Response.Timing.
 func (c *Client) Generate(ctx context.Context, prompt []*Message, opts ...Option) (*Response, error) {
 	if c == nil || c.provider == nil {
 		return nil, &Error{Provider: "", Op: "Generate", Err: ErrInvalidInput}
 	}
+	timer := newRequestTimer()
+	ctx = timer.trace(ctx)
 	merged := mergeOptions(c.defaultOpts, opts)
 	resp, err := c.provider.Generate(ctx, prompt, merged...)
 	if err != nil {
 		return nil, &Error{Provider: c.provider.Name(), Op: "Generate", Err: err}
 	}
 	computeCost(resp, merged)
+	resp.Timing = timer.snapshot(true)
 	return resp, nil
 }
 
@@ -51,15 +55,47 @@ func computeCost(resp *Response, opts []Option) {
 	resp.Usage.Cost = inputCost + outputCost
 }
 
-// Stream initiates a streaming interaction and returns a read-only channel of chunks.
+// Stream initiates a streaming interaction and returns a read-only channel of
+// chunks. Every chunk carries a Timing snapshot; the terminal chunk (Done or
+// Err) carries the complete metrics including Total stream duration.
 func (c *Client) Stream(ctx context.Context, prompt []*Message, opts ...Option) (<-chan StreamChunk, error) {
 	if c == nil || c.provider == nil {
 		return nil, &Error{Provider: "", Op: "Stream", Err: ErrInvalidInput}
 	}
+	timer := newRequestTimer()
+	ctx = timer.trace(ctx)
 	merged := mergeOptions(c.defaultOpts, opts)
 	ch, err := c.provider.Stream(ctx, prompt, merged...)
 	if err != nil {
 		return nil, &Error{Provider: c.provider.Name(), Op: "Stream", Err: err}
 	}
-	return ch, nil
+	return instrumentStream(timer, ch), nil
+}
+
+// instrumentStream forwards provider chunks to a new channel, attaching a
+// TimingMetrics snapshot to each. It owns the timer's plain fields, so no
+// locking is required. Content-bearing chunks (text, reasoning, tool-call
+// deltas) mark TTFT and the chunk counter; usage-only and terminal-only
+// frames do not count as content.
+func instrumentStream(timer *requestTimer, ch <-chan StreamChunk) <-chan StreamChunk {
+	out := make(chan StreamChunk)
+	go func() {
+		defer close(out)
+		for chunk := range ch {
+			if chunk.Delta != "" || chunk.ReasoningDelta != "" || len(chunk.ToolCalls) > 0 {
+				timer.markContent()
+			}
+			terminal := chunk.Done || chunk.Err != nil
+			chunk.Timing = timer.snapshot(terminal)
+			out <- chunk
+			if terminal {
+				return
+			}
+		}
+		// Defensive: the upstream closed without a terminal frame. No
+		// built-in lane does this, but third-party providers might; emit
+		// one so consumers can always read Total from a final chunk.
+		out <- StreamChunk{Done: true, Timing: timer.snapshot(true)}
+	}()
+	return out
 }

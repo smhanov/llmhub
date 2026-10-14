@@ -408,6 +408,47 @@ resp, _ := client.Generate(ctx, prompt,
 )
 ```
 
+## Latency & Timing Telemetry
+
+llmhub measures standard latency metrics itself, so consumer applications do
+not need hand-rolled timestamping and chunk-tracking logic. Every streaming
+chunk carries a `Timing` snapshot, and the terminal chunk (`Done` or `Err`)
+carries the complete set:
+
+```go
+stream, err := client.Stream(ctx, prompt)
+if err != nil {
+    log.Fatal(err)
+}
+for chunk := range stream {
+    if chunk.Err != nil {
+        log.Printf("stream error: %v", chunk.Err)
+        break
+    }
+    fmt.Print(chunk.Delta)
+    if chunk.Done {
+        t := chunk.Timing
+        fmt.Printf("\nconnected: %v, first byte: %v, first token: %v, total: %v (%d chunks)\n",
+            t.Connected, t.FirstByte, t.FirstToken, t.Total, t.Chunks)
+    }
+}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `StartedAt` | When `Stream`/`Generate` was invoked |
+| `Connected` | Time to establish the HTTP connection (via `httptrace`), including TLS; near zero on reused connections; zero when the transport did not report it |
+| `FirstByte` | Time to the upstream's first response byte (response headers). When the request was retried (e.g. 429 backoff), it reflects the successful attempt |
+| `FirstToken` | **Time To First Token (TTFT)**: first content-bearing chunk (text, reasoning, or tool-call delta). Usage-only trailing frames do not count |
+| `Total` | Full stream duration; set on the terminal chunk and on `Generate` responses, zero on earlier chunks |
+| `Chunks` | Content-bearing chunks observed so far; final on the terminal chunk |
+
+All durations are measured from `StartedAt`; a zero duration always means
+"not available", never "instant". Non-streaming `Generate` returns
+`Response.Timing` with `Connected`, `FirstByte`, and `Total` filled.
+`Timing` is populated by the `Client` wrapper for every built-in provider —
+call a `Provider` directly (bypassing `Client`) and it stays nil.
+
 ## Prompt Caching
 
 Prompt caching is **enabled by default**. llmhub emits whatever top-level
