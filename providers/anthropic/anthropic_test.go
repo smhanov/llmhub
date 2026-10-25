@@ -578,3 +578,51 @@ func TestAnthropicStreamReasoning(t *testing.T) {
 		t.Fatalf("unexpected reasoning delta: %+v", chunk)
 	}
 }
+
+func TestBuildRequestPayload_ToolChoiceOmittedWithoutTools(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	}
+
+	// Case 1: tool choice without tools - no tool_choice key on the wire.
+	cfg := llmhub.NewConfig(
+		llmhub.WithModel("claude-test"),
+		llmhub.WithToolChoice(llmhub.RequiredToolChoice()),
+	)
+	payload, err := buildRequestPayload(prompt, cfg, false)
+	if err != nil {
+		t.Fatalf("buildRequestPayload failed: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if _, ok := decoded["tool_choice"]; ok {
+		t.Fatalf("tool_choice must be absent without tools, got %s", string(decoded["tool_choice"]))
+	}
+
+	// Case 2: with tools - rendered with the same value as before.
+	tool := llmhub.NewTool("weather", "Get weather", map[string]interface{}{"type": "object"})
+	cfg = llmhub.NewConfig(
+		llmhub.WithModel("claude-test"),
+		llmhub.WithTools(tool),
+		llmhub.WithToolChoice(llmhub.RequiredToolChoice()),
+	)
+	payload, err = buildRequestPayload(prompt, cfg, false)
+	if err != nil {
+		t.Fatalf("buildRequestPayload failed: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	var choice struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(decoded["tool_choice"], &choice); err != nil {
+		t.Fatalf("unmarshal tool_choice failed: %v", err)
+	}
+	if choice.Type != "any" {
+		t.Fatalf("expected tool_choice type 'any', got %q", choice.Type)
+	}
+}

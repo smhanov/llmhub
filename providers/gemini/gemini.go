@@ -274,7 +274,11 @@ func buildRequestBody(prompt []*llmhub.Message, cfg llmhub.Config) ([]byte, erro
 	if len(cfg.Tools) > 0 {
 		req.Tools = append(req.Tools, geminiTool{FunctionDeclarations: convertTools(cfg.Tools)})
 	}
-	if cfg.ToolChoice != nil {
+	// The guard keys off cfg.Tools, not req.Tools: googleSearch adds a tool
+	// without functionDeclarations, and Gemini rejects toolConfig without
+	// function_declarations. Tools supplied only through ExtraBody do not
+	// count.
+	if cfg.ToolChoice != nil && len(cfg.Tools) > 0 {
 		req.ToolConfig = convertToolChoice(*cfg.ToolChoice)
 	}
 	return json.Marshal(req)

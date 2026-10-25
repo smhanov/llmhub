@@ -263,6 +263,10 @@ func WithTools(tools ...Tool) Option {
 }
 
 // WithToolChoice controls whether supplied tools may, must, or must not be used.
+// The control is only sent when tools are configured: if no tools are supplied
+// (WithTools with no arguments, or never called), the tool choice is omitted
+// from the request rather than sent alone, since providers reject that shape.
+// Tools supplied only through WithExtraBody do not count.
 func WithToolChoice(choice ToolChoice) Option {
 	return func(c *Config) {
 		c.ToolChoice = &choice

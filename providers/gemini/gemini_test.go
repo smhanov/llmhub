@@ -310,3 +310,75 @@ func TestGeminiStreamArrayPayload(t *testing.T) {
 		t.Fatalf("unexpected chunk: %+v", first)
 	}
 }
+
+func TestBuildRequestBody_ToolChoiceOmittedWithoutTools(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	}
+
+	// Case 1: tool choice without tools - no toolConfig key on the wire.
+	cfg := llmhub.NewConfig(
+		llmhub.WithModel("flash-test"),
+		llmhub.WithToolChoice(llmhub.AutoToolChoice()),
+	)
+	body, err := buildRequestBody(prompt, cfg)
+	if err != nil {
+		t.Fatalf("buildRequestBody failed: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal body failed: %v", err)
+	}
+	if _, ok := decoded["toolConfig"]; ok {
+		t.Fatalf("toolConfig must be absent without tools, got %s", string(decoded["toolConfig"]))
+	}
+
+	// Case 2: with tools - rendered with the same value as before.
+	tool := llmhub.NewTool("weather", "Get weather", map[string]interface{}{"type": "object"})
+	cfg = llmhub.NewConfig(
+		llmhub.WithModel("flash-test"),
+		llmhub.WithTools(tool),
+		llmhub.WithToolChoice(llmhub.RequiredToolChoice()),
+	)
+	body, err = buildRequestBody(prompt, cfg)
+	if err != nil {
+		t.Fatalf("buildRequestBody failed: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal body failed: %v", err)
+	}
+	var config struct {
+		FunctionCallingConfig struct {
+			Mode string `json:"mode"`
+		} `json:"functionCallingConfig"`
+	}
+	if err := json.Unmarshal(decoded["toolConfig"], &config); err != nil {
+		t.Fatalf("unmarshal toolConfig failed: %v", err)
+	}
+	if config.FunctionCallingConfig.Mode != "ANY" {
+		t.Fatalf("expected toolConfig mode 'ANY', got %q", config.FunctionCallingConfig.Mode)
+	}
+
+	// Case 3: web search alone adds a googleSearch tool but no
+	// functionDeclarations, so the control must still be omitted.
+	cfg = llmhub.NewConfig(
+		llmhub.WithModel("flash-test"),
+		llmhub.WithWebSearch(true),
+		llmhub.WithToolChoice(llmhub.AutoToolChoice()),
+	)
+	body, err = buildRequestBody(prompt, cfg)
+	if err != nil {
+		t.Fatalf("buildRequestBody failed: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal body failed: %v", err)
+	}
+	if _, ok := decoded["tools"]; !ok {
+		t.Fatal("expected googleSearch tool on the wire")
+	}
+	if _, ok := decoded["toolConfig"]; ok {
+		t.Fatalf("toolConfig must be absent with googleSearch only, got %s", string(decoded["toolConfig"]))
+	}
+}

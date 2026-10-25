@@ -508,7 +508,10 @@ func BuildRequestPayload(prompt []*llmhub.Message, cfg llmhub.Config, stream boo
 	if len(cfg.Tools) > 0 {
 		req.Tools = ConvertTools(cfg.Tools)
 	}
-	if cfg.ToolChoice != nil {
+	// A tool choice is only meaningful alongside tools: strict
+	// OpenAI-compatible servers reject the request when tool_choice is set
+	// without tools. Tools supplied only through ExtraBody do not count.
+	if cfg.ToolChoice != nil && len(cfg.Tools) > 0 {
 		req.ToolChoice = ConvertToolChoice(*cfg.ToolChoice)
 	}
 

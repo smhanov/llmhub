@@ -338,7 +338,10 @@ func buildRequestPayload(prompt []*llmhub.Message, cfg llmhub.Config, stream boo
 	if len(cfg.Tools) > 0 {
 		req.Tools = convertTools(cfg.Tools)
 	}
-	if cfg.ToolChoice != nil {
+	// A tool choice is only meaningful alongside tools: Anthropic rejects
+	// any/named choices when no tools are provided. Tools supplied only
+	// through ExtraBody do not count.
+	if cfg.ToolChoice != nil && len(cfg.Tools) > 0 {
 		req.ToolChoice = convertToolChoice(*cfg.ToolChoice)
 	}
 	if len(systemParts) > 0 {

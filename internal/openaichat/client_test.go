@@ -1105,3 +1105,74 @@ func TestClientStream_EmptyChoicesNoUsageIgnored(t *testing.T) {
 		t.Fatalf("expected second chunk Done to be true")
 	}
 }
+
+func TestBuildRequestPayload_ToolChoiceOmittedWithoutTools(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	}
+
+	// Case 1: tool choice without tools - the control is absent from the
+	// payload, because strict OpenAI-compatible servers reject tool_choice
+	// when no tools are supplied.
+	cfg := llmhub.NewConfig(
+		llmhub.WithModel("gpt-4o"),
+		llmhub.WithToolChoice(llmhub.AutoToolChoice()),
+	)
+	payload, err := BuildRequestPayload(prompt, cfg, false)
+	if err != nil {
+		t.Fatalf("BuildRequestPayload failed: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if _, ok := decoded["tool_choice"]; ok {
+		t.Fatalf("tool_choice must be absent without tools, got %s", string(decoded["tool_choice"]))
+	}
+
+	// Case 2: tool choice with tools - rendered as before.
+	tool := llmhub.NewTool("weather", "Get weather", map[string]interface{}{"type": "object"})
+	cfg = llmhub.NewConfig(
+		llmhub.WithModel("gpt-4o"),
+		llmhub.WithTools(tool),
+		llmhub.WithToolChoice(llmhub.AutoToolChoice()),
+	)
+	payload, err = BuildRequestPayload(prompt, cfg, false)
+	if err != nil {
+		t.Fatalf("BuildRequestPayload failed: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if string(decoded["tool_choice"]) != `"auto"` {
+		t.Fatalf("expected tool_choice 'auto' with tools, got %s", string(decoded["tool_choice"]))
+	}
+}
+
+func TestBuildRequestPayload_ToolChoiceSurvivesSplitOptions(t *testing.T) {
+	prompt := []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	}
+	tool := llmhub.NewTool("weather", "Get weather", map[string]interface{}{"type": "object"})
+
+	// Client defaults carry the tool choice; the per-request options supply
+	// the tools. The merged config must still render the control.
+	cfg := llmhub.NewConfig(
+		llmhub.WithModel("gpt-4o"),
+		llmhub.WithToolChoice(llmhub.AutoToolChoice()),
+	)
+	llmhub.ApplyOptions(&cfg, llmhub.WithTools(tool))
+
+	payload, err := BuildRequestPayload(prompt, cfg, false)
+	if err != nil {
+		t.Fatalf("BuildRequestPayload failed: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if string(decoded["tool_choice"]) != `"auto"` {
+		t.Fatalf("expected tool_choice 'auto' after per-request tools, got %s", string(decoded["tool_choice"]))
+	}
+}

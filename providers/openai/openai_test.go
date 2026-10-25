@@ -588,3 +588,75 @@ func TestClientStreamHTTPTraceTTFB(t *testing.T) {
 		t.Errorf("Connected = %v is negative", tm.Connected)
 	}
 }
+
+// strictToolChoiceServer rejects tool_choice without tools the way strict
+// OpenAI-compatible servers do, and otherwise serves a normal response.
+func strictToolChoiceServer(t *testing.T, stream bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		data, _ := io.ReadAll(r.Body)
+		var body map[string]json.RawMessage
+		if err := json.Unmarshal(data, &body); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_, hasChoice := body["tool_choice"]
+		_, hasTools := body["tools"]
+		if hasChoice && !hasTools {
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"error":{"message":"When using tool_choice, tools must be set","type":"invalid_request_error"}}`)
+			return
+		}
+		if !stream {
+			io.WriteString(w, `{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+}
+
+func TestOpenAIGenerateToolChoiceWithoutToolsOmitted(t *testing.T) {
+	server := strictToolChoiceServer(t, false)
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("test-model"), llmhub.WithBaseURL(server.URL), llmhub.WithToolChoice(llmhub.AutoToolChoice()))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("generate must succeed without tools: %v", err)
+	}
+	if resp.Text() != "ok" {
+		t.Fatalf("unexpected response text: %q", resp.Text())
+	}
+}
+
+func TestOpenAIStreamToolChoiceWithoutToolsOmitted(t *testing.T) {
+	server := strictToolChoiceServer(t, true)
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("test-model"), llmhub.WithBaseURL(server.URL), llmhub.WithToolChoice(llmhub.AutoToolChoice()))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream must succeed without tools: %v", err)
+	}
+	chunk := <-stream
+	if chunk.Delta != "ok" {
+		t.Fatalf("unexpected delta: %+v", chunk)
+	}
+	finalChunk := <-stream
+	if !finalChunk.Done {
+		t.Fatalf("expected done chunk: %+v", finalChunk)
+	}
+}
