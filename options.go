@@ -267,6 +267,8 @@ func WithTools(tools ...Tool) Option {
 // (WithTools with no arguments, or never called), the tool choice is omitted
 // from the request rather than sent alone, since providers reject that shape.
 // Tools supplied only through WithExtraBody do not count.
+// Ollama supports tool calling but has no tool-choice control, so this setting
+// is ignored there.
 func WithToolChoice(choice ToolChoice) Option {
 	return func(c *Config) {
 		c.ToolChoice = &choice

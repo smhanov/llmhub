@@ -166,7 +166,7 @@ finalResp, _ := client.Generate(ctx, messages)
 fmt.Println(finalResp.Text())
 ```
 
-Tool choice helpers include `AutoToolChoice`, `NoToolChoice`, `RequiredToolChoice`, and `NamedToolChoice("tool_name")` for providers that expose tool-choice controls. The tool-choice control is only sent when tools are configured; with no tools it is omitted from the request (tools supplied only through `WithExtraBody` do not count), so a default tool choice can be set without breaking tool-free turns. Streaming tool calls are exposed on `StreamChunk.ToolCalls`. Parallel OpenAI-style argument fragments include `ToolCallContent.Index` so callers can reassemble concurrent tool calls.
+Tool choice helpers include `AutoToolChoice`, `NoToolChoice`, `RequiredToolChoice`, and `NamedToolChoice("tool_name")` for providers that expose tool-choice controls. The tool-choice control is only sent when tools are configured; with no tools it is omitted from the request (tools supplied only through `WithExtraBody` do not count), so a default tool choice can be set without breaking tool-free turns. Ollama supports tool calling but has no tool-choice control, so the setting is ignored there. Streaming tool calls are exposed on `StreamChunk.ToolCalls`. Parallel OpenAI-style argument fragments include `ToolCallContent.Index` so callers can reassemble concurrent tool calls.
 
 | Provider  | Tool Calling Support |
 | --------- | -------------------- |
