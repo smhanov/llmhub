@@ -1,6 +1,7 @@
 package llmhub
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -88,6 +89,27 @@ func (r *ReasoningContent) Type() string { return "reasoning" }
 
 // Reasoning is a helper constructor for a reasoning part.
 func Reasoning(s string) *ReasoningContent { return &ReasoningContent{Text: s} }
+
+// ReasoningDetail is one structured reasoning entry returned by providers that
+// expose more than a flat reasoning string (OpenRouter-style
+// `reasoning_details`). The common types are:
+//
+//	reasoning.summary   - readable summary; Text carries Summary
+//	reasoning.text      - readable text, optionally signed; Text + Signature
+//	reasoning.encrypted - opaque payload; Data carries the encrypted blob
+//
+// Type is kept verbatim so providers can add types without an llmhub change.
+// Raw holds the original JSON object, including fields llmhub does not model,
+// so callers can log or forward the full detail.
+type ReasoningDetail struct {
+	Type      string
+	ID        string
+	Format    string
+	Text      string // summary or text payload
+	Data      string // encrypted payload
+	Signature string
+	Raw       json.RawMessage
+}
 
 // ImageContent represents a reference to an image by URL or base64 payload.
 type ImageContent struct {
@@ -208,6 +230,11 @@ type Response struct {
 	ID      string
 	Content []ContentPart
 	Usage   UsageMetadata
+	// ReasoningDetails exposes structured reasoning returned by
+	// OpenAI-compatible providers (summaries, signed text, encrypted
+	// blocks) in provider order. It is nil when the provider sends no
+	// reasoning_details. Use ReasoningText for the flat reasoning view.
+	ReasoningDetails []ReasoningDetail
 	// Timing carries built-in latency telemetry (Connected, FirstByte,
 	// Total) for non-streaming requests. It is nil only for providers
 	// invoked without the Client wrapper (direct Provider calls).
@@ -297,6 +324,12 @@ type StreamChunk struct {
 	Delta string
 	// ReasoningDelta is the incremental reasoning text produced since the previous chunk.
 	ReasoningDelta string
+	// ReasoningDetails carries structured reasoning deltas returned by
+	// OpenAI-compatible providers (summaries, signed text, encrypted
+	// blocks). Each chunk holds only the details from its own frame: llmhub
+	// does not accumulate them, so append across chunks when the full set
+	// is needed.
+	ReasoningDetails []ReasoningDetail
 	// ToolCalls carries streamed tool call deltas.
 	ToolCalls []*ToolCallContent
 	// Usage carries token and cost accounting when the upstream reports it.

@@ -145,14 +145,22 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	if err != nil {
 		return nil, err
 	}
+	details, err := decodeReasoningDetails(decoded.Choices[0].Message.ReasoningDetails)
+	if err != nil {
+		return nil, err
+	}
 	parts = AppendReasoningParts(parts, decoded.Choices[0].Message.ReasoningContent, decoded.Choices[0].Message.Reasoning)
+	if decoded.Choices[0].Message.ReasoningContent == "" && decoded.Choices[0].Message.Reasoning == "" {
+		parts = AppendReasoningParts(parts, detailsFlatText(details))
+	}
 	parts = appendToolCallParts(parts, decoded.Choices[0].Message.ToolCalls)
 
 	resp := &llmhub.Response{
-		ID:      decoded.ID,
-		Content: parts,
-		Usage:   usageFromBlock(decoded.Usage),
-		Raw:     decoded,
+		ID:               decoded.ID,
+		Content:          parts,
+		ReasoningDetails: details,
+		Usage:            usageFromBlock(decoded.Usage),
+		Raw:              decoded,
 	}
 	return resp, nil
 }
@@ -277,10 +285,11 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			}
 
 			var (
-				deltaText      string
-				reasoningDelta string
-				toolCalls      []*llmhub.ToolCallContent
-				finishReason   string
+				deltaText        string
+				reasoningDelta   string
+				reasoningDetails []llmhub.ReasoningDetail
+				toolCalls        []*llmhub.ToolCallContent
+				finishReason     string
 			)
 			if len(streamResp.Choices) > 0 {
 				var err error
@@ -289,12 +298,21 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 					chunks <- llmhub.StreamChunk{Err: err, Done: true}
 					return
 				}
-				reasoningDelta = FirstNonEmpty(reasoningDelta, streamResp.Choices[0].Delta.ReasoningContent, streamResp.Choices[0].Delta.Reasoning)
+				reasoningDetails, err = decodeReasoningDetails(streamResp.Choices[0].Delta.ReasoningDetails)
+				if err != nil {
+					chunks <- llmhub.StreamChunk{Err: err, Done: true}
+					return
+				}
+				flatReasoning := FirstNonEmpty(streamResp.Choices[0].Delta.ReasoningContent, streamResp.Choices[0].Delta.Reasoning)
+				if flatReasoning == "" {
+					flatReasoning = detailsFlatText(reasoningDetails)
+				}
+				reasoningDelta = FirstNonEmpty(reasoningDelta, flatReasoning)
 				toolCalls = ToolCallsFromAPI(streamResp.Choices[0].Delta.ToolCalls)
 				finishReason = streamResp.Choices[0].FinishReason
 			}
 
-			if deltaText == "" && reasoningDelta == "" && len(toolCalls) == 0 && usage == nil && finishReason == "" {
+			if deltaText == "" && reasoningDelta == "" && len(reasoningDetails) == 0 && len(toolCalls) == 0 && usage == nil && finishReason == "" {
 				continue
 			}
 			select {
@@ -302,12 +320,13 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				chunks <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
 				return
 			case chunks <- llmhub.StreamChunk{
-				ID:             streamResp.ID,
-				Delta:          deltaText,
-				ReasoningDelta: reasoningDelta,
-				ToolCalls:      toolCalls,
-				Usage:          usage,
-				FinishReason:   finishReason,
+				ID:               streamResp.ID,
+				Delta:            deltaText,
+				ReasoningDelta:   reasoningDelta,
+				ReasoningDetails: reasoningDetails,
+				ToolCalls:        toolCalls,
+				Usage:            usage,
+				FinishReason:     finishReason,
 			}:
 			}
 		}
@@ -816,6 +835,48 @@ func ExtractDeltaContent(raw json.RawMessage) (string, string, error) {
 	return "", "", fmt.Errorf("openaichat: unable to decode stream delta payload")
 }
 
+// decodeReasoningDetails converts a raw OpenRouter-style `reasoning_details`
+// array into public details. Each element keeps its original JSON in Raw so
+// fields llmhub does not model survive. Unknown type values are preserved as
+// opaque details rather than rejected; malformed elements return an error.
+func decodeReasoningDetails(raw json.RawMessage) ([]llmhub.ReasoningDetail, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil, nil
+	}
+	var elements []json.RawMessage
+	if err := json.Unmarshal(trimmed, &elements); err != nil {
+		return nil, fmt.Errorf("openaichat: decode reasoning_details: %w", err)
+	}
+	details := make([]llmhub.ReasoningDetail, 0, len(elements))
+	for i, element := range elements {
+		var wire reasoningDetailWire
+		if err := json.Unmarshal(element, &wire); err != nil {
+			return nil, fmt.Errorf("openaichat: decode reasoning_details[%d]: %w", i, err)
+		}
+		details = append(details, llmhub.ReasoningDetail{
+			Type:      wire.Type,
+			ID:        wire.ID,
+			Format:    wire.Format,
+			Text:      FirstNonEmpty(wire.Summary, wire.Text),
+			Data:      wire.Data,
+			Signature: wire.Signature,
+			Raw:       append(json.RawMessage(nil), element...),
+		})
+	}
+	return details, nil
+}
+
+// detailsFlatText concatenates the readable text of details in provider order.
+// Encrypted entries carry no text and contribute nothing.
+func detailsFlatText(details []llmhub.ReasoningDetail) string {
+	var b strings.Builder
+	for _, detail := range details {
+		b.WriteString(detail.Text)
+	}
+	return b.String()
+}
+
 // AppendReasoningParts appends reasoning text candidates to parts as ReasoningContent.
 func AppendReasoningParts(parts []llmhub.ContentPart, candidates ...string) []llmhub.ContentPart {
 	for _, candidate := range candidates {
@@ -927,7 +988,21 @@ type chatMessageResponse struct {
 	Content          json.RawMessage  `json:"content"`
 	Reasoning        string           `json:"reasoning,omitempty"`
 	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ReasoningDetails json.RawMessage  `json:"reasoning_details,omitempty"`
 	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
+}
+
+// reasoningDetailWire mirrors the known fields of one OpenRouter-style
+// reasoning_details element. Unknown fields are preserved through the parent
+// raw array element in ReasoningDetail.Raw.
+type reasoningDetailWire struct {
+	Type      string `json:"type"`
+	ID        string `json:"id,omitempty"`
+	Format    string `json:"format,omitempty"`
+	Summary   string `json:"summary,omitempty"`
+	Text      string `json:"text,omitempty"`
+	Data      string `json:"data,omitempty"`
+	Signature string `json:"signature,omitempty"`
 }
 
 type usageBlock struct {
@@ -957,6 +1032,7 @@ type streamResponse struct {
 			Content          json.RawMessage  `json:"content"`
 			Reasoning        string           `json:"reasoning,omitempty"`
 			ReasoningContent string           `json:"reasoning_content,omitempty"`
+			ReasoningDetails json.RawMessage  `json:"reasoning_details,omitempty"`
 			ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason,omitempty"`

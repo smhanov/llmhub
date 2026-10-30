@@ -1473,3 +1473,380 @@ func TestClientStream_CleanStreamUnaffectedByErrorHandling(t *testing.T) {
 		t.Fatalf("expected clean terminal chunk, got %+v", chunks[2])
 	}
 }
+
+// newReasoningDetailsClient points the shared client at an httptest server so
+// the reasoning_details fixtures below stay focused on the wire shape.
+func newReasoningDetailsClient(server *httptest.Server) *Client {
+	return NewClient(ClientConfig{
+		ProviderName: "test-provider",
+		BaseConfig: llmhub.NewConfig(
+			llmhub.WithBaseURL(server.URL),
+			llmhub.WithHTTPClient(server.Client()),
+			llmhub.WithAPIKey("test-key"),
+			llmhub.WithModel("test-model"),
+		),
+	})
+}
+
+func TestClientGenerate_ReasoningDetailsSummary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{
+			"id": "chatcmpl-rd",
+			"choices": [{
+				"message": {
+					"role": "assistant",
+					"content": "42",
+					"reasoning_details": [{
+						"type": "reasoning.summary",
+						"summary": "The ball costs five cents.",
+						"id": "rs_1",
+						"format": "openai-responses-v1",
+						"vendor_extra": true
+					}]
+				}
+			}],
+			"usage": {}
+		}`)
+	}))
+	defer server.Close()
+
+	resp, err := newReasoningDetailsClient(server).Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("bat and ball")),
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if len(resp.ReasoningDetails) != 1 {
+		t.Fatalf("expected 1 reasoning detail, got %d: %+v", len(resp.ReasoningDetails), resp.ReasoningDetails)
+	}
+	detail := resp.ReasoningDetails[0]
+	if detail.Type != "reasoning.summary" {
+		t.Errorf("expected type reasoning.summary, got %q", detail.Type)
+	}
+	if detail.Text != "The ball costs five cents." {
+		t.Errorf("expected summary text, got %q", detail.Text)
+	}
+	if detail.ID != "rs_1" || detail.Format != "openai-responses-v1" {
+		t.Errorf("expected id/format preserved, got %+v", detail)
+	}
+	if len(detail.Raw) == 0 {
+		t.Fatal("expected Raw to preserve the original detail JSON")
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(detail.Raw, &raw); err != nil {
+		t.Fatalf("detail.Raw is not valid JSON: %v", err)
+	}
+	if raw["vendor_extra"] != true {
+		t.Errorf("expected unknown field to survive in Raw, got %v", raw["vendor_extra"])
+	}
+	if resp.ReasoningText() != "The ball costs five cents." {
+		t.Errorf("expected details-only text via ReasoningText(), got %q", resp.ReasoningText())
+	}
+	if resp.Text() != "42" {
+		t.Errorf("expected answer text 42, got %q", resp.Text())
+	}
+}
+
+func TestClientGenerate_ReasoningDetailsFlatWins(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{
+			"id": "chatcmpl-rd-flat",
+			"choices": [{
+				"message": {
+					"role": "assistant",
+					"content": "42",
+					"reasoning_content": "F",
+					"reasoning_details": [{"type": "reasoning.summary", "summary": "S"}]
+				}
+			}],
+			"usage": {}
+		}`)
+	}))
+	defer server.Close()
+
+	resp, err := newReasoningDetailsClient(server).Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("bat and ball")),
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if resp.ReasoningText() != "F" {
+		t.Fatalf("expected flat reasoning to win without duplication, got %q", resp.ReasoningText())
+	}
+	if len(resp.ReasoningDetails) != 1 || resp.ReasoningDetails[0].Text != "S" {
+		t.Fatalf("expected summary detail to remain available, got %+v", resp.ReasoningDetails)
+	}
+}
+
+func TestClientGenerate_ReasoningDetailsEncrypted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{
+			"id": "chatcmpl-rd-enc",
+			"choices": [{
+				"message": {
+					"role": "assistant",
+					"content": "42",
+					"reasoning_details": [{
+						"type": "reasoning.encrypted",
+						"data": "ciphertext-blob",
+						"id": "enc_1",
+						"format": "openai-responses-v1"
+					}]
+				}
+			}],
+			"usage": {}
+		}`)
+	}))
+	defer server.Close()
+
+	resp, err := newReasoningDetailsClient(server).Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("bat and ball")),
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if resp.ReasoningText() != "" {
+		t.Fatalf("expected empty flat reasoning for encrypted-only details, got %q", resp.ReasoningText())
+	}
+	if len(resp.ReasoningDetails) != 1 {
+		t.Fatalf("expected 1 reasoning detail, got %+v", resp.ReasoningDetails)
+	}
+	detail := resp.ReasoningDetails[0]
+	if detail.Type != "reasoning.encrypted" {
+		t.Errorf("expected type reasoning.encrypted, got %q", detail.Type)
+	}
+	if detail.Data != "ciphertext-blob" {
+		t.Errorf("expected encrypted data preserved, got %q", detail.Data)
+	}
+	if detail.Text != "" {
+		t.Errorf("expected no readable text, got %q", detail.Text)
+	}
+}
+
+func TestClientGenerate_ReasoningDetailsUnknownTypePreservesRaw(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{
+			"id": "chatcmpl-rd-unknown",
+			"choices": [{
+				"message": {
+					"role": "assistant",
+					"content": "ok",
+					"reasoning_details": [{
+						"type": "vendor.reasoning",
+						"text": "opaque",
+						"vendor_nested": {"step": 1}
+					}]
+				}
+			}],
+			"usage": {}
+		}`)
+	}))
+	defer server.Close()
+
+	resp, err := newReasoningDetailsClient(server).Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if len(resp.ReasoningDetails) != 1 {
+		t.Fatalf("expected unknown type to yield a detail, got %+v", resp.ReasoningDetails)
+	}
+	detail := resp.ReasoningDetails[0]
+	if detail.Type != "vendor.reasoning" || detail.Text != "opaque" {
+		t.Errorf("expected unknown type and text preserved, got %+v", detail)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(detail.Raw, &raw); err != nil {
+		t.Fatalf("detail.Raw is not valid JSON: %v", err)
+	}
+	if _, ok := raw["vendor_nested"]; !ok {
+		t.Errorf("expected unknown nested field in Raw, got %v", raw)
+	}
+}
+
+func TestClientStream_ReasoningDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+
+		fmt.Fprintf(w, "data: {\"id\":\"s1\",\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.summary\",\"summary\":\"step one\",\"id\":\"rs_1\"}]}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: {\"id\":\"s1\",\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"step two\",\"signature\":\"sig-1\"}]}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: {\"id\":\"s1\",\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	chunksCh, err := newStreamTestClient(server, "test-provider").Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 4 {
+		t.Fatalf("expected 4 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if len(chunks[0].ReasoningDetails) != 1 {
+		t.Fatalf("expected first chunk details, got %+v", chunks[0])
+	}
+	first := chunks[0].ReasoningDetails[0]
+	if first.Type != "reasoning.summary" || first.Text != "step one" || first.ID != "rs_1" {
+		t.Errorf("unexpected first detail: %+v", first)
+	}
+	if chunks[0].ReasoningDelta != "step one" {
+		t.Errorf("expected summary fallback delta, got %q", chunks[0].ReasoningDelta)
+	}
+
+	if len(chunks[1].ReasoningDetails) != 1 {
+		t.Fatalf("expected only this chunk's detail (no accumulation), got %+v", chunks[1].ReasoningDetails)
+	}
+	second := chunks[1].ReasoningDetails[0]
+	if second.Type != "reasoning.text" || second.Text != "step two" || second.Signature != "sig-1" {
+		t.Errorf("unexpected second detail: %+v", second)
+	}
+	if chunks[1].ReasoningDelta != "step two" {
+		t.Errorf("expected text fallback delta, got %q", chunks[1].ReasoningDelta)
+	}
+
+	if chunks[2].Delta != "answer" || len(chunks[2].ReasoningDetails) != 0 || chunks[2].ReasoningDelta != "" {
+		t.Errorf("unexpected answer chunk: %+v", chunks[2])
+	}
+	if !chunks[3].Done {
+		t.Errorf("expected terminal Done chunk, got %+v", chunks[3])
+	}
+}
+
+func TestClientStream_ReasoningDetailsFlatWins(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+
+		fmt.Fprintf(w, "data: {\"id\":\"s1\",\"choices\":[{\"delta\":{\"reasoning\":\"F\",\"reasoning_details\":[{\"type\":\"reasoning.summary\",\"summary\":\"S\"}]}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	chunksCh, err := newStreamTestClient(server, "test-provider").Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].ReasoningDelta != "F" {
+		t.Fatalf("expected flat reasoning delta to win, got %q", chunks[0].ReasoningDelta)
+	}
+	if len(chunks[0].ReasoningDetails) != 1 || chunks[0].ReasoningDetails[0].Text != "S" {
+		t.Fatalf("expected details to remain available, got %+v", chunks[0].ReasoningDetails)
+	}
+}
+
+func TestClientStream_ReasoningDetailsEncryptedOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+
+		fmt.Fprintf(w, "data: {\"id\":\"s1\",\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"data\":\"ciphertext-blob\"}]}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	chunksCh, err := newStreamTestClient(server, "test-provider").Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 2 {
+		t.Fatalf("expected encrypted details chunk plus Done, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].ReasoningDelta != "" {
+		t.Errorf("expected no flat reasoning for encrypted details, got %q", chunks[0].ReasoningDelta)
+	}
+	if len(chunks[0].ReasoningDetails) != 1 {
+		t.Fatalf("expected encrypted detail to survive the skip filter, got %+v", chunks[0])
+	}
+	detail := chunks[0].ReasoningDetails[0]
+	if detail.Type != "reasoning.encrypted" || detail.Data != "ciphertext-blob" {
+		t.Errorf("unexpected encrypted detail: %+v", detail)
+	}
+}
+
+func TestClientStream_ReasoningDetailsMalformed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+
+		fmt.Fprintf(w, "data: {\"id\":\"s1\",\"choices\":[{\"delta\":{\"reasoning_details\":[123]}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	chunksCh, err := newStreamTestClient(server, "test-provider").Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 1 {
+		t.Fatalf("expected a single terminal error chunk, got %d: %+v", len(chunks), chunks)
+	}
+	if !chunks[0].Done || chunks[0].Err == nil {
+		t.Fatalf("expected Done=true with Err set, got %+v", chunks[0])
+	}
+	if !strings.Contains(chunks[0].Err.Error(), "reasoning_details") {
+		t.Fatalf("expected a reasoning_details decoding error, got %v", chunks[0].Err)
+	}
+}
+
+func TestClientGenerate_ReasoningDetailsMalformed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{
+			"id": "chatcmpl-rd-bad",
+			"choices": [{
+				"message": {
+					"role": "assistant",
+					"content": "ok",
+					"reasoning_details": [123]
+				}
+			}],
+			"usage": {}
+		}`)
+	}))
+	defer server.Close()
+
+	_, err := newReasoningDetailsClient(server).Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err == nil {
+		t.Fatal("expected Generate to surface malformed reasoning_details")
+	}
+	if !strings.Contains(err.Error(), "reasoning_details") {
+		t.Fatalf("expected a reasoning_details decoding error, got %v", err)
+	}
+}

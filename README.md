@@ -133,6 +133,47 @@ for _, part := range resp.Content {
 
 For streaming, reasoning is exposed separately on each chunk via `StreamChunk.ReasoningDelta`.
 
+### Structured reasoning details
+
+OpenAI-compatible providers (OpenAI, OpenRouter, xAI, ZAI) can also return
+`reasoning_details`, a structured array that distinguishes readable summaries,
+signed text, and opaque encrypted reasoning. llmhub exposes those entries on
+`Response.ReasoningDetails` and `StreamChunk.ReasoningDetails`:
+
+```go
+resp, _ := client.Generate(ctx, prompt)
+for _, detail := range resp.ReasoningDetails {
+    switch detail.Type {
+    case "reasoning.summary":
+        fmt.Println("summary:", detail.Text)
+    case "reasoning.text":
+        fmt.Println("signed text:", detail.Text, detail.Signature)
+    case "reasoning.encrypted":
+        fmt.Println("encrypted reasoning:", len(detail.Data), "bytes")
+    }
+}
+```
+
+`ReasoningDetail` carries `Type`, `ID`, `Format`, `Text` (the summary or text
+payload), `Data` (the encrypted payload), `Signature`, and `Raw` (the original
+JSON object, including fields llmhub does not model). `Type` is kept verbatim,
+so new provider types remain usable.
+
+Flat `reasoning` / `reasoning_content` takes precedence. If a provider sends
+both a flat string and a summary of the same text, `ReasoningText()` and
+`ReasoningDelta` contain only the flat string while the details remain
+available separately on `ReasoningDetails`. When only details are present,
+their readable text is also surfaced through `ReasoningText()` /
+`ReasoningDelta`, so existing consumers keep seeing thinking without changes.
+Encrypted-only reasoning yields empty flat text but non-empty details, letting
+callers detect that reasoning happened even though it cannot be read.
+
+Streaming details are deltas: each chunk carries only the entries from its own
+frame and llmhub does not accumulate them. Append `ReasoningDetails` across
+chunks if the full set is needed. Details are exposed for logging and
+inspection only; llmhub does not replay encrypted or signed details on a later
+assistant turn.
+
 ## Thinking Level
 
 Request-side reasoning depth is controlled with `WithThinkingLevel` (`minimal`, `low`, `medium`, `high`, `xhigh`). Unset means the model default. Each provider maps it to its native control; providers without one ignore it.
