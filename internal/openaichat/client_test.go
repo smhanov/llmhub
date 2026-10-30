@@ -1850,3 +1850,238 @@ func TestClientGenerate_ReasoningDetailsMalformed(t *testing.T) {
 		t.Fatalf("expected a reasoning_details decoding error, got %v", err)
 	}
 }
+
+func TestClientGenerate_UpstreamInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-upstream-served-by", "router-node-7")
+		w.Header().Set("x-request-id", "req-abc")
+		w.Header().Set("openai-processing-ms", "123")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{
+			"id": "chatcmpl-upstream",
+			"provider": "TestProvider",
+			"model": "resolved-model",
+			"system_fingerprint": "fp_1",
+			"choices": [{"message": {"role": "assistant", "content": "hello"}}],
+			"usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+		}`)
+	}))
+	defer server.Close()
+
+	resp, err := newReasoningDetailsClient(server).Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if resp.ID != "chatcmpl-upstream" {
+		t.Fatalf("ID = %q, want chatcmpl-upstream", resp.ID)
+	}
+	if resp.Text() != "hello" {
+		t.Fatalf("Text() = %q, want hello", resp.Text())
+	}
+	if resp.Usage.TotalTokens != 5 {
+		t.Fatalf("TotalTokens = %d, want 5", resp.Usage.TotalTokens)
+	}
+	if resp.Upstream == nil {
+		t.Fatal("Upstream is nil")
+	}
+	if resp.Upstream.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want 200", resp.Upstream.StatusCode)
+	}
+	if got := resp.Upstream.Headers.Get("x-upstream-served-by"); got != "router-node-7" {
+		t.Fatalf("x-upstream-served-by = %q, want router-node-7", got)
+	}
+	if got := resp.Upstream.Headers.Get("x-request-id"); got != "req-abc" {
+		t.Fatalf("x-request-id = %q, want req-abc", got)
+	}
+	if got := resp.Upstream.Headers.Get("openai-processing-ms"); got != "123" {
+		t.Fatalf("openai-processing-ms = %q, want 123", got)
+	}
+	if resp.Upstream.Provider != "TestProvider" {
+		t.Fatalf("Provider = %q, want TestProvider", resp.Upstream.Provider)
+	}
+	if resp.Upstream.Model != "resolved-model" {
+		t.Fatalf("Model = %q, want resolved-model", resp.Upstream.Model)
+	}
+	if resp.Upstream.SystemFingerprint != "fp_1" {
+		t.Fatalf("SystemFingerprint = %q, want fp_1", resp.Upstream.SystemFingerprint)
+	}
+}
+
+func TestClientGenerate_UpstreamInfoAbsentFieldsStayEmpty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"id":"chatcmpl-plain","choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer server.Close()
+
+	resp, err := newReasoningDetailsClient(server).Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if resp.Upstream == nil {
+		t.Fatal("Upstream is nil")
+	}
+	if resp.Upstream.Provider != "" || resp.Upstream.Model != "" || resp.Upstream.SystemFingerprint != "" {
+		t.Fatalf("expected empty identity fields, got %+v", resp.Upstream)
+	}
+}
+
+func TestClientStream_UpstreamInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("x-upstream-served-by", "router-node-7")
+		w.Header().Set("x-request-id", "req-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "response writer does not flush", http.StatusInternalServerError)
+			return
+		}
+
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"provider\":\"TestProvider\",\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"model\":\"resolved-model\",\"system_fingerprint\":\"fp_1\",\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := newReasoningDetailsClient(server)
+	chunksCh, err := client.Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 4 {
+		t.Fatalf("expected 4 chunks, got %d: %+v", len(chunks), chunks)
+	}
+
+	var text strings.Builder
+	for i, chunk := range chunks {
+		if chunk.Upstream == nil {
+			t.Fatalf("chunk %d has nil Upstream", i)
+		}
+		if chunk.Upstream.StatusCode != http.StatusOK {
+			t.Fatalf("chunk %d StatusCode = %d, want 200", i, chunk.Upstream.StatusCode)
+		}
+		if got := chunk.Upstream.Headers.Get("x-upstream-served-by"); got != "router-node-7" {
+			t.Fatalf("chunk %d x-upstream-served-by = %q, want router-node-7", i, got)
+		}
+		if got := chunk.Upstream.Headers.Get("x-request-id"); got != "req-stream" {
+			t.Fatalf("chunk %d x-request-id = %q, want req-stream", i, got)
+		}
+		text.WriteString(chunk.Delta)
+	}
+
+	if text.String() != "Hello world" {
+		t.Fatalf("streamed text = %q, want %q", text.String(), "Hello world")
+	}
+
+	if chunks[0].Upstream.Provider != "TestProvider" {
+		t.Fatalf("chunk 0 Provider = %q, want TestProvider", chunks[0].Upstream.Provider)
+	}
+	if chunks[0].Upstream.Model != "" || chunks[0].Upstream.SystemFingerprint != "" {
+		t.Fatalf("chunk 0 identity should not include later fields, got %+v", chunks[0].Upstream)
+	}
+	for i := 1; i < len(chunks); i++ {
+		if chunks[i].Upstream.Provider != "TestProvider" {
+			t.Fatalf("chunk %d Provider = %q, want TestProvider", i, chunks[i].Upstream.Provider)
+		}
+		if chunks[i].Upstream.Model != "resolved-model" {
+			t.Fatalf("chunk %d Model = %q, want resolved-model", i, chunks[i].Upstream.Model)
+		}
+		if chunks[i].Upstream.SystemFingerprint != "fp_1" {
+			t.Fatalf("chunk %d SystemFingerprint = %q, want fp_1", i, chunks[i].Upstream.SystemFingerprint)
+		}
+	}
+	if !chunks[len(chunks)-1].Done {
+		t.Fatal("terminal chunk is not Done")
+	}
+
+	// Each chunk must carry a private struct snapshot, so earlier chunks do
+	// not change when later frames reveal more identity fields.
+	if chunks[0].Upstream == chunks[1].Upstream || chunks[1].Upstream == chunks[2].Upstream {
+		t.Fatal("expected distinct Upstream snapshots per chunk")
+	}
+	if chunks[0].Upstream.Model != "" {
+		t.Fatalf("earlier snapshot was mutated after stream completion: %+v", chunks[0].Upstream)
+	}
+}
+
+func TestClientStream_UpstreamInfoOnError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("x-request-id", "req-error")
+		flusher, _ := w.(http.Flusher)
+
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: {\"provider\":\"ErrProvider\",\"model\":\"err-model\",\"error\":{\"message\":\"boom\",\"type\":\"server_error\"}}\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := newReasoningDetailsClient(server)
+	chunksCh, err := client.Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %+v", len(chunks), chunks)
+	}
+
+	errChunk := chunks[len(chunks)-1]
+	if !errChunk.Done || errChunk.Err == nil {
+		t.Fatalf("expected terminal error chunk, got %+v", errChunk)
+	}
+	if errChunk.Upstream == nil {
+		t.Fatal("terminal error chunk has nil Upstream")
+	}
+	if got := errChunk.Upstream.Headers.Get("x-request-id"); got != "req-error" {
+		t.Fatalf("x-request-id = %q, want req-error", got)
+	}
+	if errChunk.Upstream.Provider != "ErrProvider" {
+		t.Fatalf("Provider = %q, want ErrProvider", errChunk.Upstream.Provider)
+	}
+	if errChunk.Upstream.Model != "err-model" {
+		t.Fatalf("Model = %q, want err-model", errChunk.Upstream.Model)
+	}
+	for i, chunk := range chunks {
+		if chunk.Upstream == nil {
+			t.Fatalf("chunk %d has nil Upstream", i)
+		}
+	}
+}
+
+func TestNewUpstreamInfo_ClonesHeaders(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusAccepted,
+		Header:     http.Header{"X-Test": []string{"one"}},
+	}
+	info := newUpstreamInfo(resp)
+	if info.StatusCode != http.StatusAccepted {
+		t.Fatalf("StatusCode = %d, want 202", info.StatusCode)
+	}
+	info.Headers.Set("X-Test", "two")
+	if got := resp.Header.Get("X-Test"); got != "one" {
+		t.Fatalf("mutating Upstream.Headers changed the originating response: %q", got)
+	}
+
+	empty := newUpstreamInfo(&http.Response{StatusCode: http.StatusNoContent})
+	if empty.Headers == nil {
+		t.Fatal("nil response headers should normalize to an empty map")
+	}
+	if len(empty.Headers) != 0 {
+		t.Fatalf("expected empty headers, got %v", empty.Headers)
+	}
+}

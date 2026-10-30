@@ -417,3 +417,100 @@ func TestOllamaStreamErrorIsTyped(t *testing.T) {
 		t.Fatalf("unexpected error payload: %+v", streamErr)
 	}
 }
+
+func TestOllamaGenerateUpstreamInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-ollama-request-id", "req_ollama_1")
+		w.Header().Set("x-upstream-served-by", "ollama-node-2")
+		io.WriteString(w, `{
+			"model": "llama-resolved",
+			"message": {"role": "assistant", "content": "pong"},
+			"prompt_eval_count": 1,
+			"eval_count": 2,
+			"done": true
+		}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("", llmhub.WithBaseURL(server.URL), llmhub.WithModel("local"))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("ping"))})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if resp.Text() != "pong" {
+		t.Fatalf("Text() = %q, want pong", resp.Text())
+	}
+	if resp.Upstream == nil {
+		t.Fatal("Upstream is nil")
+	}
+	if resp.Upstream.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want 200", resp.Upstream.StatusCode)
+	}
+	if got := resp.Upstream.Headers.Get("x-ollama-request-id"); got != "req_ollama_1" {
+		t.Fatalf("x-ollama-request-id = %q, want req_ollama_1", got)
+	}
+	if got := resp.Upstream.Headers.Get("x-upstream-served-by"); got != "ollama-node-2" {
+		t.Fatalf("x-upstream-served-by = %q, want ollama-node-2", got)
+	}
+	if resp.Upstream.Model != "llama-resolved" {
+		t.Fatalf("Model = %q, want llama-resolved", resp.Upstream.Model)
+	}
+	if resp.Upstream.Provider != "" || resp.Upstream.SystemFingerprint != "" {
+		t.Fatalf("unexpected identity fields: %+v", resp.Upstream)
+	}
+}
+
+func TestOllamaStreamUpstreamInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-ollama-request-id", "req_ollama_stream")
+		io.WriteString(w, `{"model":"llama-resolved","message":{"role":"assistant","content":"hel"},"done":false}`+"\n")
+		io.WriteString(w, `{"model":"llama-resolved","message":{"role":"assistant","content":"lo"},"done":true,"done_reason":"stop"}`+"\n")
+	}))
+	defer server.Close()
+
+	provider, err := New("", llmhub.WithBaseURL(server.URL), llmhub.WithModel("local"))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("ping"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+
+	var chunks []llmhub.StreamChunk
+	var text strings.Builder
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+		text.WriteString(chunk.Delta)
+	}
+	if text.String() != "hello" {
+		t.Fatalf("streamed text = %q, want hello", text.String())
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	for i, chunk := range chunks {
+		if chunk.Upstream == nil {
+			t.Fatalf("chunk %d has nil Upstream", i)
+		}
+		if chunk.Upstream.StatusCode != http.StatusOK {
+			t.Fatalf("chunk %d StatusCode = %d, want 200", i, chunk.Upstream.StatusCode)
+		}
+		if got := chunk.Upstream.Headers.Get("x-ollama-request-id"); got != "req_ollama_stream" {
+			t.Fatalf("chunk %d x-ollama-request-id = %q", i, got)
+		}
+		if chunk.Upstream.Model != "llama-resolved" {
+			t.Fatalf("chunk %d Model = %q, want llama-resolved", i, chunk.Upstream.Model)
+		}
+	}
+	if !chunks[len(chunks)-1].Done {
+		t.Fatal("terminal chunk is not Done")
+	}
+	if chunks[0].Upstream == chunks[1].Upstream {
+		t.Fatal("expected a distinct Upstream snapshot per chunk")
+	}
+}

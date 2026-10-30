@@ -132,6 +132,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 		body, _ := io.ReadAll(httpResp.Body)
 		return nil, fmt.Errorf("%s: http %d: %s", c.providerName, httpResp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	upstream := newUpstreamInfo(httpResp)
 
 	var decoded completionResponse
 	if err := json.NewDecoder(httpResp.Body).Decode(&decoded); err != nil {
@@ -155,11 +156,16 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	}
 	parts = appendToolCallParts(parts, decoded.Choices[0].Message.ToolCalls)
 
+	upstream.Provider = decoded.Provider
+	upstream.Model = decoded.Model
+	upstream.SystemFingerprint = decoded.SystemFingerprint
+
 	resp := &llmhub.Response{
 		ID:               decoded.ID,
 		Content:          parts,
 		ReasoningDetails: details,
 		Usage:            usageFromBlock(decoded.Usage),
+		Upstream:         upstream,
 		Raw:              decoded,
 	}
 	return resp, nil
@@ -196,6 +202,21 @@ func httpStatusError(provider string, resp *http.Response) error {
 	return fmt.Errorf("%s: http %d: %s", provider, resp.StatusCode, strings.TrimSpace(string(body)))
 }
 
+// newUpstreamInfo captures the status code and a clone of the response
+// headers. The clone is shared read-only by callers and by every chunk of a
+// stream. A nil header map is normalized to an empty map so callers can range
+// over Headers safely.
+func newUpstreamInfo(resp *http.Response) *llmhub.UpstreamInfo {
+	headers := http.Header{}
+	if resp.Header != nil {
+		headers = resp.Header.Clone()
+	}
+	return &llmhub.UpstreamInfo{
+		StatusCode: resp.StatusCode,
+		Headers:    headers,
+	}
+}
+
 // Stream executes a streaming chat completion request and yields chunks over a channel.
 func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...llmhub.Option) (<-chan llmhub.StreamChunk, error) {
 	cfg := c.MergeConfig(opts...)
@@ -212,10 +233,21 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 		return nil, httpStatusError(c.providerName, httpResp)
 	}
 
+	// Capture status and headers before the goroutine starts. The goroutine is
+	// the only writer of the identity fields; each emitted chunk receives a
+	// private shallow copy, and the Headers map is shared read-only.
+	upstream := newUpstreamInfo(httpResp)
+
 	chunks := make(chan llmhub.StreamChunk)
 	go func() {
 		defer httpResp.Body.Close()
 		defer close(chunks)
+
+		withUpstream := func(chunk llmhub.StreamChunk) llmhub.StreamChunk {
+			snapshot := *upstream
+			chunk.Upstream = &snapshot
+			return chunk
+		}
 
 		decoder := sse.NewDecoder(httpResp.Body)
 		for {
@@ -224,7 +256,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				if errors.Is(err, io.EOF) {
 					return
 				}
-				chunks <- llmhub.StreamChunk{Err: err, Done: true}
+				chunks <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 				return
 			}
 			data := strings.TrimSpace(event.Data)
@@ -232,30 +264,43 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				continue
 			}
 			if data == "[DONE]" {
-				chunks <- llmhub.StreamChunk{Done: true}
+				chunks <- withUpstream(llmhub.StreamChunk{Done: true})
 				return
 			}
 			var streamResp streamResponse
 			if err := json.Unmarshal([]byte(data), &streamResp); err != nil {
 				if event.Name == "error" {
-					chunks <- llmhub.StreamChunk{
+					chunks <- withUpstream(llmhub.StreamChunk{
 						Err:  &llmhub.StreamError{Provider: c.providerName, Message: data},
 						Done: true,
-					}
+					})
 					return
 				}
-				chunks <- llmhub.StreamChunk{Err: err, Done: true}
+				chunks <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 				return
+			}
+
+			// Identity fields may appear on only some frames; the last
+			// non-empty value wins. Update the template before any terminal
+			// or content chunk is emitted from this frame.
+			if streamResp.Provider != "" {
+				upstream.Provider = streamResp.Provider
+			}
+			if streamResp.Model != "" {
+				upstream.Model = streamResp.Model
+			}
+			if streamResp.SystemFingerprint != "" {
+				upstream.SystemFingerprint = streamResp.SystemFingerprint
 			}
 
 			// A frame carrying a provider error is terminal. Check it before
 			// the content filter so an error-only frame is never dropped as
 			// an empty completion.
 			if streamResp.Error != nil {
-				chunks <- llmhub.StreamChunk{
+				chunks <- withUpstream(llmhub.StreamChunk{
 					Err:  streamErrorFromPayload(c.providerName, streamResp.Error),
 					Done: true,
-				}
+				})
 				return
 			}
 			// Some routers signal errors with an `event: error` frame and no
@@ -265,16 +310,16 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			if event.Name == "error" {
 				var payload streamErrorPayload
 				if err := json.Unmarshal([]byte(data), &payload); err == nil && payload.hasContent() {
-					chunks <- llmhub.StreamChunk{
+					chunks <- withUpstream(llmhub.StreamChunk{
 						Err:  streamErrorFromPayload(c.providerName, &payload),
 						Done: true,
-					}
+					})
 					return
 				}
-				chunks <- llmhub.StreamChunk{
+				chunks <- withUpstream(llmhub.StreamChunk{
 					Err:  &llmhub.StreamError{Provider: c.providerName, Message: data},
 					Done: true,
-				}
+				})
 				return
 			}
 
@@ -295,12 +340,12 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				var err error
 				deltaText, reasoningDelta, err = ExtractDeltaContent(streamResp.Choices[0].Delta.Content)
 				if err != nil {
-					chunks <- llmhub.StreamChunk{Err: err, Done: true}
+					chunks <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 					return
 				}
 				reasoningDetails, err = decodeReasoningDetails(streamResp.Choices[0].Delta.ReasoningDetails)
 				if err != nil {
-					chunks <- llmhub.StreamChunk{Err: err, Done: true}
+					chunks <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 					return
 				}
 				flatReasoning := FirstNonEmpty(streamResp.Choices[0].Delta.ReasoningContent, streamResp.Choices[0].Delta.Reasoning)
@@ -317,9 +362,9 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			}
 			select {
 			case <-ctx.Done():
-				chunks <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+				chunks <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 				return
-			case chunks <- llmhub.StreamChunk{
+			case chunks <- withUpstream(llmhub.StreamChunk{
 				ID:               streamResp.ID,
 				Delta:            deltaText,
 				ReasoningDelta:   reasoningDelta,
@@ -327,7 +372,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				ToolCalls:        toolCalls,
 				Usage:            usage,
 				FinishReason:     finishReason,
-			}:
+			}):
 			}
 		}
 	}()
@@ -976,8 +1021,11 @@ type OpenAIFunctionCall struct {
 }
 
 type completionResponse struct {
-	ID      string `json:"id"`
-	Choices []struct {
+	ID                string `json:"id"`
+	Provider          string `json:"provider,omitempty"`
+	Model             string `json:"model,omitempty"`
+	SystemFingerprint string `json:"system_fingerprint,omitempty"`
+	Choices           []struct {
 		Message chatMessageResponse `json:"message"`
 	} `json:"choices"`
 	Usage usageBlock `json:"usage"`
@@ -1026,8 +1074,11 @@ type completionTokensDetails struct {
 }
 
 type streamResponse struct {
-	ID      string `json:"id"`
-	Choices []struct {
+	ID                string `json:"id"`
+	Provider          string `json:"provider,omitempty"`
+	Model             string `json:"model,omitempty"`
+	SystemFingerprint string `json:"system_fingerprint,omitempty"`
+	Choices           []struct {
 		Delta struct {
 			Content          json.RawMessage  `json:"content"`
 			Reasoning        string           `json:"reasoning,omitempty"`

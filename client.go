@@ -81,7 +81,11 @@ func instrumentStream(timer *requestTimer, ch <-chan StreamChunk) <-chan StreamC
 	out := make(chan StreamChunk)
 	go func() {
 		defer close(out)
+		var lastUpstream *UpstreamInfo
 		for chunk := range ch {
+			if chunk.Upstream != nil {
+				lastUpstream = chunk.Upstream
+			}
 			if chunk.Delta != "" || chunk.ReasoningDelta != "" || len(chunk.ToolCalls) > 0 {
 				timer.markContent()
 			}
@@ -94,8 +98,14 @@ func instrumentStream(timer *requestTimer, ch <-chan StreamChunk) <-chan StreamC
 		}
 		// Defensive: the upstream closed without a terminal frame. No
 		// built-in lane does this, but third-party providers might; emit
-		// one so consumers can always read Total from a final chunk.
-		out <- StreamChunk{Done: true, Timing: timer.snapshot(true)}
+		// one so consumers can always read Total from a final chunk. Carry
+		// the last observed upstream snapshot when the provider sent one.
+		synthetic := StreamChunk{Done: true, Timing: timer.snapshot(true)}
+		if lastUpstream != nil {
+			snapshot := *lastUpstream
+			synthetic.Upstream = &snapshot
+		}
+		out <- synthetic
 	}()
 	return out
 }

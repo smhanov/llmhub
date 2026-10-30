@@ -683,3 +683,108 @@ func TestBuildRequestPayload_ToolChoiceOmittedWithoutTools(t *testing.T) {
 		t.Fatalf("expected tool_choice type 'any', got %q", choice.Type)
 	}
 }
+
+func TestAnthropicGenerateUpstreamInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("request-id", "req_anthropic_1")
+		w.Header().Set("anthropic-ratelimit-requests-remaining", "42")
+		io.WriteString(w, `{
+			"id": "msg_upstream",
+			"model": "claude-resolved",
+			"content": [{"type": "text", "text": "hello"}],
+			"usage": {"input_tokens": 4, "output_tokens": 5}
+		}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("claude-test"), llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if resp.Text() != "hello" {
+		t.Fatalf("Text() = %q, want hello", resp.Text())
+	}
+	if resp.Upstream == nil {
+		t.Fatal("Upstream is nil")
+	}
+	if resp.Upstream.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want 200", resp.Upstream.StatusCode)
+	}
+	if got := resp.Upstream.Headers.Get("request-id"); got != "req_anthropic_1" {
+		t.Fatalf("request-id = %q, want req_anthropic_1", got)
+	}
+	if got := resp.Upstream.Headers.Get("anthropic-ratelimit-requests-remaining"); got != "42" {
+		t.Fatalf("anthropic-ratelimit-requests-remaining = %q, want 42", got)
+	}
+	if resp.Upstream.Model != "claude-resolved" {
+		t.Fatalf("Model = %q, want claude-resolved", resp.Upstream.Model)
+	}
+	if resp.Upstream.Provider != "" || resp.Upstream.SystemFingerprint != "" {
+		t.Fatalf("unexpected identity fields: %+v", resp.Upstream)
+	}
+}
+
+func TestAnthropicStreamUpstreamInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("request-id", "req_anthropic_stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "event: message_start\ndata: {\"message\":{\"id\":\"msg_1\",\"model\":\"claude-resolved\",\"usage\":{\"input_tokens\":3}}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"delta\":{\"text\":\"hello\"}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: message_stop\ndata: {}\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithModel("claude-test"), llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+
+	var chunks []llmhub.StreamChunk
+	var text strings.Builder
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+		text.WriteString(chunk.Delta)
+	}
+	if text.String() != "hello" {
+		t.Fatalf("streamed text = %q, want hello", text.String())
+	}
+	if len(chunks) == 0 {
+		t.Fatal("no chunks received")
+	}
+	for i, chunk := range chunks {
+		if chunk.Upstream == nil {
+			t.Fatalf("chunk %d has nil Upstream", i)
+		}
+		if chunk.Upstream.StatusCode != http.StatusOK {
+			t.Fatalf("chunk %d StatusCode = %d, want 200", i, chunk.Upstream.StatusCode)
+		}
+		if got := chunk.Upstream.Headers.Get("request-id"); got != "req_anthropic_stream" {
+			t.Fatalf("chunk %d request-id = %q", i, got)
+		}
+		if chunk.Upstream.Model != "claude-resolved" {
+			t.Fatalf("chunk %d Model = %q, want claude-resolved", i, chunk.Upstream.Model)
+		}
+	}
+	if !chunks[len(chunks)-1].Done {
+		t.Fatal("terminal chunk is not Done")
+	}
+	if chunks[0].Upstream == chunks[1].Upstream {
+		t.Fatal("expected a distinct Upstream snapshot per chunk")
+	}
+}

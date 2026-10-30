@@ -2,6 +2,7 @@ package llmhub
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -225,6 +226,29 @@ type UsageMetadata struct {
 	Cost                float64 // Estimated cost in US dollars based on configured per-million-token rates.
 }
 
+// UpstreamInfo identifies the HTTP upstream that answered a request. It is
+// populated by the built-in HTTP providers and nil for providers that do not
+// use an HTTP transport.
+type UpstreamInfo struct {
+	// StatusCode is the HTTP status code of the successful response.
+	StatusCode int
+	// Headers is a clone of the response headers captured when the response
+	// arrived. It is read-only; call Clone before mutating. For streams,
+	// every chunk shares the same map.
+	Headers http.Header
+	// Provider is the vendor-reported serving provider (for example
+	// OpenRouter's provider field), not llmhub's configured provider name
+	// (Client.ProviderName). It is empty when the upstream does not report
+	// one.
+	Provider string
+	// Model is the model that actually answered, when the upstream reports
+	// it. Routers may resolve a configured alias to a concrete model.
+	Model string
+	// SystemFingerprint is the upstream's configuration fingerprint, when
+	// reported.
+	SystemFingerprint string
+}
+
 // Response contains the normalized result returned from a provider.
 type Response struct {
 	ID      string
@@ -239,7 +263,11 @@ type Response struct {
 	// Total) for non-streaming requests. It is nil only for providers
 	// invoked without the Client wrapper (direct Provider calls).
 	Timing *TimingMetrics
-	Raw    interface{}
+	// Upstream identifies the HTTP upstream that answered: status code,
+	// response headers, and vendor-reported identity fields. It is nil for
+	// providers that do not use an HTTP transport.
+	Upstream *UpstreamInfo
+	Raw      interface{}
 }
 
 // Text concatenates the textual segments of the response for the common use case where only text matters.
@@ -343,6 +371,12 @@ type StreamChunk struct {
 	// when this chunk was produced. It is nil only for providers invoked
 	// without the Client wrapper (direct Provider calls).
 	Timing *TimingMetrics
-	Done   bool
-	Err    error
+	// Upstream identifies the HTTP upstream that answered. Each chunk carries
+	// its own shallow snapshot; Headers is shared across chunks and read-only.
+	// StatusCode and Headers are available from the first chunk, while
+	// Provider, Model, and SystemFingerprint fill in as soon as the upstream
+	// reports them, so early chunks may carry empty identity fields.
+	Upstream *UpstreamInfo
+	Done     bool
+	Err      error
 }

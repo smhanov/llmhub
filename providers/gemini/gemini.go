@@ -55,6 +55,21 @@ func New(apiKey string, opts ...llmhub.Option) (llmhub.Provider, error) {
 
 func (c *Client) Name() string { return providerName }
 
+// newUpstreamInfo captures the status code and a clone of the response
+// headers. The clone is shared read-only by callers and by every chunk of a
+// stream. A nil header map is normalized to an empty map so callers can range
+// over Headers safely.
+func newUpstreamInfo(resp *http.Response) *llmhub.UpstreamInfo {
+	headers := http.Header{}
+	if resp.Header != nil {
+		headers = resp.Header.Clone()
+	}
+	return &llmhub.UpstreamInfo{
+		StatusCode: resp.StatusCode,
+		Headers:    headers,
+	}
+}
+
 func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ...llmhub.Option) (*llmhub.Response, error) {
 	cfg := c.mergeConfig(opts...)
 	reqBody, err := buildRequestBody(prompt, cfg)
@@ -84,6 +99,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("gemini: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	upstream := newUpstreamInfo(resp)
 
 	var decoded geminiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
@@ -100,6 +116,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	} else if usage.TotalCost != nil {
 		cost = *usage.TotalCost
 	}
+	upstream.Model = decoded.ModelVersion
 	return &llmhub.Response{
 		Content: parts,
 		Usage: llmhub.UsageMetadata{
@@ -108,7 +125,8 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 			TotalTokens:      usage.TotalTokenCount,
 			Cost:             cost,
 		},
-		Raw: decoded,
+		Upstream: upstream,
+		Raw:      decoded,
 	}, nil
 }
 
@@ -142,10 +160,22 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 		return nil, fmt.Errorf("gemini: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
+	// Capture status and headers before the goroutine starts. The goroutine is
+	// the only writer of the identity fields; each emitted chunk receives a
+	// private shallow copy, and the Headers map is shared read-only.
+	upstream := newUpstreamInfo(resp)
+
 	ch := make(chan llmhub.StreamChunk)
 	go func() {
 		defer resp.Body.Close()
 		defer close(ch)
+
+		withUpstream := func(chunk llmhub.StreamChunk) llmhub.StreamChunk {
+			snapshot := *upstream
+			chunk.Upstream = &snapshot
+			return chunk
+		}
+
 		scanner := bufio.NewScanner(resp.Body)
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 4*1024*1024)
@@ -170,7 +200,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 					continue
 				}
 				if err := json.Unmarshal([]byte(payload), &parsed); err != nil {
-					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 					return
 				}
 			} else {
@@ -178,13 +208,16 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			}
 			pending.Reset()
 			for _, current := range parsed {
+				if current.ModelVersion != "" && upstream.Model == "" {
+					upstream.Model = current.ModelVersion
+				}
 				if current.Error != nil {
-					ch <- llmhub.StreamChunk{Err: streamErrorFromGemini(current.Error), Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: streamErrorFromGemini(current.Error), Done: true})
 					return
 				}
 				text, reasoning, toolCalls, finishReason, err := extractContent(current.Candidates)
 				if err != nil {
-					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 					return
 				}
 				if text == "" && reasoning == "" && len(toolCalls) == 0 && finishReason == "" {
@@ -192,17 +225,17 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				}
 				select {
 				case <-ctx.Done():
-					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning, ToolCalls: toolCalls, FinishReason: finishReason}:
+				case ch <- withUpstream(llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning, ToolCalls: toolCalls, FinishReason: finishReason}):
 				}
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			ch <- llmhub.StreamChunk{Err: err, Done: true}
+			ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 			return
 		}
-		ch <- llmhub.StreamChunk{Done: true}
+		ch <- withUpstream(llmhub.StreamChunk{Done: true})
 	}()
 
 	return ch, nil
@@ -609,8 +642,9 @@ type thinkingConfig struct {
 }
 
 type geminiResponse struct {
-	Candidates []candidate   `json:"candidates"`
-	Usage      usageMetadata `json:"usageMetadata"`
+	ModelVersion string        `json:"modelVersion,omitempty"`
+	Candidates   []candidate   `json:"candidates"`
+	Usage        usageMetadata `json:"usageMetadata"`
 	// Error carries a provider-reported failure frame. Gemini can emit an
 	// error-only object mid-stream instead of a candidate.
 	Error *geminiError `json:"error,omitempty"`

@@ -515,6 +515,59 @@ All durations are measured from `StartedAt`; a zero duration always means
 `Timing` is populated by the `Client` wrapper for every built-in provider —
 call a `Provider` directly (bypassing `Client`) and it stays nil.
 
+## Upstream Attribution
+
+Routers and aggregators can serve one configured model name from different
+upstreams. Every successful `Response` and every `StreamChunk` carries an
+`Upstream` view of the HTTP response that answered:
+
+| Field | Meaning |
+| ----- | ------- |
+| `StatusCode` | HTTP status of the successful response |
+| `Headers` | Clone of the response headers, captured when the response arrived |
+| `Provider` | Vendor-reported serving provider (for example OpenRouter's `provider`), **not** llmhub's configured provider name from `Client.ProviderName()` |
+| `Model` | Model that actually answered; routers may resolve an alias to a concrete model |
+| `SystemFingerprint` | Upstream configuration fingerprint, when reported |
+
+```go
+resp, err := client.Generate(ctx, prompt)
+if err != nil {
+    log.Fatal(err)
+}
+if u := resp.Upstream; u != nil {
+    log.Printf("status=%d provider=%s model=%s fingerprint=%s request-id=%s",
+        u.StatusCode, u.Provider, u.Model, u.SystemFingerprint,
+        u.Headers.Get("x-request-id"))
+}
+```
+
+For streams, each chunk carries its own shallow snapshot of the response
+metadata. The `Headers` map is cloned once per request and is shared by every
+chunk, so treat it as **read-only** — call `Headers.Clone()` before mutating.
+`StatusCode` and `Headers` are available from the first chunk, while
+`Provider`, `Model`, and `SystemFingerprint` fill in as soon as the upstream
+reports them; early chunks may carry empty identity fields. The same values are
+available on the terminal `Done` or `Err` chunk.
+
+```go
+for chunk := range stream {
+    if chunk.Err != nil {
+        log.Printf("stream error: %v", chunk.Err)
+        break
+    }
+    if u := chunk.Upstream; u != nil {
+        log.Printf("served by %s (%s) status=%d request-id=%s",
+            u.Provider, u.Model, u.StatusCode, u.Headers.Get("x-request-id"))
+    }
+}
+```
+
+Absent fields stay empty: llmhub never fabricates an upstream identity. The
+built-in providers populate `Upstream` on direct `Provider` calls as well as
+through `Client`; only `Timing` is wrapper-only. Response headers are the
+caller's own response and may contain cookies or internal routing data, so
+treat them with the same care as the response body.
+
 ## Prompt Caching
 
 Prompt caching is **enabled by default**. llmhub emits whatever top-level

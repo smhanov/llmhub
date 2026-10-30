@@ -434,3 +434,98 @@ func TestBuildRequestBody_ToolChoiceOmittedWithoutTools(t *testing.T) {
 		t.Fatalf("toolConfig must be absent with googleSearch only, got %s", string(decoded["toolConfig"]))
 	}
 }
+
+func TestGeminiGenerateUpstreamInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-goog-request-id", "req_gemini_1")
+		w.Header().Set("x-upstream-served-by", "gemini-node-3")
+		io.WriteString(w, `{
+			"modelVersion": "gemini-resolved",
+			"candidates": [{"content": {"parts": [{"text": "pong"}]}}],
+			"usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 2, "totalTokenCount": 3}
+		}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("secret", llmhub.WithBaseURL(server.URL), llmhub.WithModel("flash-test"))
+	if err != nil {
+		t.Fatalf("provider new: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("ping"))})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if resp.Text() != "pong" {
+		t.Fatalf("Text() = %q, want pong", resp.Text())
+	}
+	if resp.Upstream == nil {
+		t.Fatal("Upstream is nil")
+	}
+	if resp.Upstream.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want 200", resp.Upstream.StatusCode)
+	}
+	if got := resp.Upstream.Headers.Get("x-goog-request-id"); got != "req_gemini_1" {
+		t.Fatalf("x-goog-request-id = %q, want req_gemini_1", got)
+	}
+	if got := resp.Upstream.Headers.Get("x-upstream-served-by"); got != "gemini-node-3" {
+		t.Fatalf("x-upstream-served-by = %q, want gemini-node-3", got)
+	}
+	if resp.Upstream.Model != "gemini-resolved" {
+		t.Fatalf("Model = %q, want gemini-resolved", resp.Upstream.Model)
+	}
+	if resp.Upstream.Provider != "" || resp.Upstream.SystemFingerprint != "" {
+		t.Fatalf("unexpected identity fields: %+v", resp.Upstream)
+	}
+}
+
+func TestGeminiStreamUpstreamInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-goog-request-id", "req_gemini_stream")
+		fmt.Fprintln(w, `{"modelVersion":"gemini-resolved","candidates":[{"content":{"parts":[{"text":"foo"}]}}]}`)
+		fmt.Fprintln(w, `{"candidates":[{"content":{"parts":[{"text":"bar"}]}}]}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("secret", llmhub.WithBaseURL(server.URL), llmhub.WithModel("flash-test"))
+	if err != nil {
+		t.Fatalf("provider new: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+
+	var chunks []llmhub.StreamChunk
+	var text strings.Builder
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+		text.WriteString(chunk.Delta)
+	}
+	if text.String() != "foobar" {
+		t.Fatalf("streamed text = %q, want foobar", text.String())
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	for i, chunk := range chunks {
+		if chunk.Upstream == nil {
+			t.Fatalf("chunk %d has nil Upstream", i)
+		}
+		if chunk.Upstream.StatusCode != http.StatusOK {
+			t.Fatalf("chunk %d StatusCode = %d, want 200", i, chunk.Upstream.StatusCode)
+		}
+		if got := chunk.Upstream.Headers.Get("x-goog-request-id"); got != "req_gemini_stream" {
+			t.Fatalf("chunk %d x-goog-request-id = %q", i, got)
+		}
+		if chunk.Upstream.Model != "gemini-resolved" {
+			t.Fatalf("chunk %d Model = %q, want gemini-resolved", i, chunk.Upstream.Model)
+		}
+	}
+	if !chunks[len(chunks)-1].Done {
+		t.Fatal("terminal chunk is not Done")
+	}
+	if chunks[0].Upstream == chunks[1].Upstream {
+		t.Fatal("expected a distinct Upstream snapshot per chunk")
+	}
+}

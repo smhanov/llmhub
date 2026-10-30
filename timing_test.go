@@ -3,6 +3,7 @@ package llmhub
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -173,7 +174,13 @@ func TestClientStreamTimingSynthesizesDoneOnBareClose(t *testing.T) {
 	stub := &testProvider{
 		streamFn: func(ctx context.Context, prompt []*Message, opts ...Option) (<-chan StreamChunk, error) {
 			ch := make(chan StreamChunk, 1)
-			ch <- StreamChunk{Delta: "only"}
+			ch <- StreamChunk{
+				Delta: "only",
+				Upstream: &UpstreamInfo{
+					StatusCode: http.StatusOK,
+					Headers:    http.Header{"X-Request-Id": []string{"req-1"}},
+				},
+			}
 			close(ch)
 			return ch, nil
 		},
@@ -198,6 +205,15 @@ func TestClientStreamTimingSynthesizesDoneOnBareClose(t *testing.T) {
 	}
 	if chunks[1].Timing.Chunks != 1 {
 		t.Errorf("synthesized chunk Chunks = %d, want 1 (it carries no content)", chunks[1].Timing.Chunks)
+	}
+	if chunks[1].Upstream == nil || chunks[1].Upstream.StatusCode != http.StatusOK {
+		t.Fatalf("synthesized chunk Upstream = %+v, want last observed upstream snapshot", chunks[1].Upstream)
+	}
+	if got := chunks[1].Upstream.Headers.Get("X-Request-Id"); got != "req-1" {
+		t.Fatalf("synthesized chunk X-Request-Id = %q, want req-1", got)
+	}
+	if chunks[0].Upstream == chunks[1].Upstream {
+		t.Fatal("synthesized chunk should carry its own Upstream snapshot")
 	}
 }
 

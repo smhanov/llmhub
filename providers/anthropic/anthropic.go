@@ -56,6 +56,21 @@ func New(apiKey string, opts ...llmhub.Option) (llmhub.Provider, error) {
 
 func (c *Client) Name() string { return providerName }
 
+// newUpstreamInfo captures the status code and a clone of the response
+// headers. The clone is shared read-only by callers and by every chunk of a
+// stream. A nil header map is normalized to an empty map so callers can range
+// over Headers safely.
+func newUpstreamInfo(resp *http.Response) *llmhub.UpstreamInfo {
+	headers := http.Header{}
+	if resp.Header != nil {
+		headers = resp.Header.Clone()
+	}
+	return &llmhub.UpstreamInfo{
+		StatusCode: resp.StatusCode,
+		Headers:    headers,
+	}
+}
+
 func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ...llmhub.Option) (*llmhub.Response, error) {
 	cfg := c.mergeConfig(opts...)
 	payload, err := buildRequestPayload(prompt, cfg, false)
@@ -78,6 +93,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("anthropic: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	upstream := newUpstreamInfo(resp)
 
 	var decoded anthropicResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
@@ -93,12 +109,14 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	} else if decoded.Usage.TotalCost != nil {
 		cost = *decoded.Usage.TotalCost
 	}
+	upstream.Model = decoded.Model
 
 	return &llmhub.Response{
-		ID:      decoded.ID,
-		Content: parts,
-		Usage:   *usageFromBlock(decoded.Usage, cost),
-		Raw:     decoded,
+		ID:       decoded.ID,
+		Content:  parts,
+		Usage:    *usageFromBlock(decoded.Usage, cost),
+		Upstream: upstream,
+		Raw:      decoded,
 	}, nil
 }
 
@@ -125,10 +143,21 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 		return nil, fmt.Errorf("anthropic: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
+	// Capture status and headers before the goroutine starts. The goroutine is
+	// the only writer of the identity fields; each emitted chunk receives a
+	// private shallow copy, and the Headers map is shared read-only.
+	upstream := newUpstreamInfo(resp)
+
 	ch := make(chan llmhub.StreamChunk)
 	go func() {
 		defer resp.Body.Close()
 		defer close(ch)
+
+		withUpstream := func(chunk llmhub.StreamChunk) llmhub.StreamChunk {
+			snapshot := *upstream
+			chunk.Upstream = &snapshot
+			return chunk
+		}
 
 		decoder := sse.NewDecoder(resp.Body)
 		streamToolCalls := map[int]*llmhub.ToolCallContent{}
@@ -139,14 +168,14 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				if errors.Is(err, io.EOF) {
 					return
 				}
-				ch <- llmhub.StreamChunk{Err: err, Done: true}
+				ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 				return
 			}
 			switch event.Name {
 			case "content_block_start":
 				var start anthropicContentBlockStartEvent
 				if err := json.Unmarshal([]byte(event.Data), &start); err != nil {
-					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 					return
 				}
 				if start.ContentBlock.Type == "tool_use" {
@@ -156,7 +185,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			case "content_block_delta":
 				var delta anthropicDeltaEvent
 				if err := json.Unmarshal([]byte(event.Data), &delta); err != nil {
-					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 					return
 				}
 				if delta.Delta.PartialJSON != "" {
@@ -175,14 +204,14 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				}
 				select {
 				case <-ctx.Done():
-					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning}:
+				case ch <- withUpstream(llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning}):
 				}
 			case "content_block_stop":
 				var stop anthropicContentBlockStopEvent
 				if err := json.Unmarshal([]byte(event.Data), &stop); err != nil {
-					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 					return
 				}
 				toolCall := streamToolCalls[stop.Index]
@@ -196,33 +225,36 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				delete(streamToolArgs, stop.Index)
 				select {
 				case <-ctx.Done():
-					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- llmhub.StreamChunk{ToolCalls: []*llmhub.ToolCallContent{toolCall}}:
+				case ch <- withUpstream(llmhub.StreamChunk{ToolCalls: []*llmhub.ToolCallContent{toolCall}}):
 				}
 			case "message_start":
 				var start anthropicMessageStartEvent
 				if err := json.Unmarshal([]byte(event.Data), &start); err != nil {
-					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 					return
+				}
+				if start.Message.Model != "" {
+					upstream.Model = start.Message.Model
 				}
 				usage := usageFromBlock(start.Message.Usage, 0)
 				if start.Message.ID != "" {
-					ch <- llmhub.StreamChunk{ID: start.Message.ID}
+					ch <- withUpstream(llmhub.StreamChunk{ID: start.Message.ID})
 				}
 				if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.CacheReadTokens == 0 && usage.CacheCreationTokens == 0 {
 					continue
 				}
 				select {
 				case <-ctx.Done():
-					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- llmhub.StreamChunk{Usage: usage}:
+				case ch <- withUpstream(llmhub.StreamChunk{Usage: usage}):
 				}
 			case "message_delta":
 				var delta anthropicMessageDeltaEvent
 				if err := json.Unmarshal([]byte(event.Data), &delta); err != nil {
-					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 					return
 				}
 				usage := usageFromBlock(delta.Usage, 0)
@@ -231,36 +263,36 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				}
 				select {
 				case <-ctx.Done():
-					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- llmhub.StreamChunk{Usage: usage, FinishReason: mapStopReason(delta.Delta.StopReason)}:
+				case ch <- withUpstream(llmhub.StreamChunk{Usage: usage, FinishReason: mapStopReason(delta.Delta.StopReason)}):
 				}
 			case "message_stop":
 				for index, toolCall := range streamToolCalls {
 					if builder := streamToolArgs[index]; builder != nil && builder.Len() > 0 {
 						toolCall.Arguments = builder.String()
 					}
-					ch <- llmhub.StreamChunk{ToolCalls: []*llmhub.ToolCallContent{toolCall}}
+					ch <- withUpstream(llmhub.StreamChunk{ToolCalls: []*llmhub.ToolCallContent{toolCall}})
 				}
-				ch <- llmhub.StreamChunk{Done: true}
+				ch <- withUpstream(llmhub.StreamChunk{Done: true})
 				return
 			case "error":
 				var payload anthropicErrorEvent
 				if err := json.Unmarshal([]byte(event.Data), &payload); err != nil {
-					ch <- llmhub.StreamChunk{Err: err, Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 				} else {
-					ch <- llmhub.StreamChunk{Err: &llmhub.StreamError{
+					ch <- withUpstream(llmhub.StreamChunk{Err: &llmhub.StreamError{
 						Provider: providerName,
 						Message:  payload.Error.Message,
 						Type:     payload.Error.Type,
 						Code:     payload.Error.Code,
 						Param:    payload.Error.Param,
-					}, Done: true}
+					}, Done: true})
 				}
 				return
 			default:
 				if event.Data == "[DONE]" {
-					ch <- llmhub.StreamChunk{Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Done: true})
 					return
 				}
 			}
@@ -622,6 +654,7 @@ type imageSource struct {
 
 type anthropicResponse struct {
 	ID      string             `json:"id"`
+	Model   string             `json:"model"`
 	Content []anthropicContent `json:"content"`
 	Usage   usageBlock         `json:"usage"`
 }
@@ -665,6 +698,7 @@ type anthropicErrorEvent struct {
 type anthropicMessageStartEvent struct {
 	Message struct {
 		ID    string     `json:"id"`
+		Model string     `json:"model"`
 		Usage usageBlock `json:"usage"`
 	} `json:"message"`
 }

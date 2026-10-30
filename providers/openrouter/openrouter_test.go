@@ -81,3 +81,44 @@ func TestOpenRouterStream(t *testing.T) {
 		t.Fatalf("unexpected delta: %+v", chunk)
 	}
 }
+
+func TestOpenRouterGenerateUpstreamInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-request-id", "req_openrouter_1")
+		w.Header().Set("x-generation-id", "gen-upstream")
+		io.WriteString(w, `{
+			"id": "gen-upstream",
+			"provider": "Azure",
+			"model": "openai/gpt-4o-mini",
+			"system_fingerprint": "fp_live",
+			"choices": [{"message": {"role": "assistant", "content": "pong"}}]
+		}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("test-key", llmhub.WithBaseURL(server.URL), llmhub.WithModel("openai/gpt-4o-mini"))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	resp, err := llmhub.Wrap(provider).Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("ping")),
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if resp.Upstream == nil {
+		t.Fatal("Upstream is nil")
+	}
+	if resp.Upstream.Provider != "Azure" {
+		t.Fatalf("Provider = %q, want Azure", resp.Upstream.Provider)
+	}
+	if resp.Upstream.Model != "openai/gpt-4o-mini" {
+		t.Fatalf("Model = %q, want openai/gpt-4o-mini", resp.Upstream.Model)
+	}
+	if resp.Upstream.SystemFingerprint != "fp_live" {
+		t.Fatalf("SystemFingerprint = %q, want fp_live", resp.Upstream.SystemFingerprint)
+	}
+	if got := resp.Upstream.Headers.Get("x-request-id"); got != "req_openrouter_1" {
+		t.Fatalf("x-request-id = %q, want req_openrouter_1", got)
+	}
+}

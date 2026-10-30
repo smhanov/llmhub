@@ -46,6 +46,21 @@ func New(apiKey string, opts ...llmhub.Option) (llmhub.Provider, error) {
 
 func (c *Client) Name() string { return providerName }
 
+// newUpstreamInfo captures the status code and a clone of the response
+// headers. The clone is shared read-only by callers and by every chunk of a
+// stream. A nil header map is normalized to an empty map so callers can range
+// over Headers safely.
+func newUpstreamInfo(resp *http.Response) *llmhub.UpstreamInfo {
+	headers := http.Header{}
+	if resp.Header != nil {
+		headers = resp.Header.Clone()
+	}
+	return &llmhub.UpstreamInfo{
+		StatusCode: resp.StatusCode,
+		Headers:    headers,
+	}
+}
+
 func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ...llmhub.Option) (*llmhub.Response, error) {
 	cfg := c.mergeConfig(opts...)
 	reqBody, err := buildChatRequest(prompt, cfg, false)
@@ -68,6 +83,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("ollama: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	upstream := newUpstreamInfo(resp)
 	var decoded chatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return nil, err
@@ -91,6 +107,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	} else if decoded.TotalCost != nil {
 		cost = *decoded.TotalCost
 	}
+	upstream.Model = decoded.Model
 	return &llmhub.Response{
 		Content: parts,
 		Usage: llmhub.UsageMetadata{
@@ -99,7 +116,8 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 			TotalTokens:      decoded.PromptEvalCount + decoded.EvalCount,
 			Cost:             cost,
 		},
-		Raw: decoded,
+		Upstream: upstream,
+		Raw:      decoded,
 	}, nil
 }
 
@@ -126,10 +144,22 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 		return nil, fmt.Errorf("ollama: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
+	// Capture status and headers before the goroutine starts. The goroutine is
+	// the only writer of the identity fields; each emitted chunk receives a
+	// private shallow copy, and the Headers map is shared read-only.
+	upstream := newUpstreamInfo(resp)
+
 	ch := make(chan llmhub.StreamChunk)
 	go func() {
 		defer resp.Body.Close()
 		defer close(ch)
+
+		withUpstream := func(chunk llmhub.StreamChunk) llmhub.StreamChunk {
+			snapshot := *upstream
+			chunk.Upstream = &snapshot
+			return chunk
+		}
+
 		scanner := bufio.NewScanner(resp.Body)
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 4*1024*1024)
@@ -140,11 +170,14 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			}
 			var chunk chatResponse
 			if err := json.Unmarshal([]byte(line), &chunk); err != nil {
-				ch <- llmhub.StreamChunk{Err: err, Done: true}
+				ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 				return
 			}
+			if chunk.Model != "" {
+				upstream.Model = chunk.Model
+			}
 			if chunk.Error != "" {
-				ch <- llmhub.StreamChunk{Err: &llmhub.StreamError{Provider: providerName, Message: chunk.Error}, Done: true}
+				ch <- withUpstream(llmhub.StreamChunk{Err: &llmhub.StreamError{Provider: providerName, Message: chunk.Error}, Done: true})
 				return
 			}
 			text := chunk.Message.Content
@@ -154,39 +187,39 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			if text != "" {
 				select {
 				case <-ctx.Done():
-					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- llmhub.StreamChunk{
+				case ch <- withUpstream(llmhub.StreamChunk{
 					Delta:          text,
 					ReasoningDelta: chunk.Message.Thinking,
 					ToolCalls:      toolCallsFromAPI(chunk.Message.ToolCalls),
-				}:
+				}):
 				}
 			} else if chunk.Message.Thinking != "" {
 				select {
 				case <-ctx.Done():
-					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- llmhub.StreamChunk{ReasoningDelta: chunk.Message.Thinking}:
+				case ch <- withUpstream(llmhub.StreamChunk{ReasoningDelta: chunk.Message.Thinking}):
 				}
 			} else if len(chunk.Message.ToolCalls) > 0 {
 				select {
 				case <-ctx.Done():
-					ch <- llmhub.StreamChunk{Err: ctx.Err(), Done: true}
+					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- llmhub.StreamChunk{ToolCalls: toolCallsFromAPI(chunk.Message.ToolCalls)}:
+				case ch <- withUpstream(llmhub.StreamChunk{ToolCalls: toolCallsFromAPI(chunk.Message.ToolCalls)}):
 				}
 			}
 			if chunk.Done {
-				ch <- llmhub.StreamChunk{Done: true, FinishReason: mapDoneReason(chunk.DoneReason)}
+				ch <- withUpstream(llmhub.StreamChunk{Done: true, FinishReason: mapDoneReason(chunk.DoneReason)})
 				return
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			ch <- llmhub.StreamChunk{Err: err, Done: true}
+			ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
 			return
 		}
-		ch <- llmhub.StreamChunk{Done: true}
+		ch <- withUpstream(llmhub.StreamChunk{Done: true})
 	}()
 
 	return ch, nil
@@ -414,6 +447,7 @@ type ollamaFunctionCall struct {
 }
 
 type chatResponse struct {
+	Model           string        `json:"model"`
 	Message         ollamaMessage `json:"message"`
 	Response        string        `json:"response"`
 	Done            bool          `json:"done"`
