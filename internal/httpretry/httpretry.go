@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/smhanov/llmhub"
+	"github.com/smhanov/llmhub/internal/telemetry"
 )
 
 const (
@@ -66,23 +67,35 @@ func Do(ctx context.Context, client *http.Client, makeReq func() (*http.Request,
 	if cfg.MaxDelay <= 0 {
 		cfg.MaxDelay = defaultMaxDelay
 	}
+	session := telemetry.FromContext(ctx)
 	for attempt := 0; ; attempt++ {
 		req, err := makeReq()
 		if err != nil {
 			return nil, err
 		}
+		started := time.Now()
 		resp, err := client.Do(req)
+		duration := time.Since(started)
 		if err != nil {
+			session.Record(telemetry.Attempt{Duration: duration, Err: err.Error()})
 			return nil, err
 		}
 		if !shouldRetry(resp.StatusCode, cfg) {
+			session.Record(telemetry.Attempt{StatusCode: resp.StatusCode, Duration: duration})
 			return resp, nil
 		}
 		if attempt >= cfg.MaxRetries {
+			session.Record(telemetry.Attempt{StatusCode: resp.StatusCode, Duration: duration})
 			return resp, nil
 		}
 		drainAndClose(resp)
-		delay := backoffDelay(resp, cfg, attempt)
+		delay, retryAfter := backoffDelay(resp, cfg, attempt)
+		session.Record(telemetry.Attempt{
+			StatusCode: resp.StatusCode,
+			Duration:   duration,
+			Backoff:    delay,
+			RetryAfter: retryAfter,
+		})
 		if !sleepWithContext(ctx, delay) {
 			return nil, ctx.Err()
 		}
@@ -96,10 +109,14 @@ func shouldRetry(status int, cfg Config) bool {
 	return status == http.StatusTooManyRequests
 }
 
-func backoffDelay(resp *http.Response, cfg Config, attempt int) time.Duration {
+// backoffDelay returns the delay to sleep before the next attempt and the raw
+// Retry-After delay when the response supplied a valid one. The returned delay
+// keeps the existing capped/jittered policy; retryAfter is uncapped so callers
+// can report what the server asked for.
+func backoffDelay(resp *http.Response, cfg Config, attempt int) (delay, retryAfter time.Duration) {
 	if resp != nil {
-		if retryAfter, ok := parseRetryAfter(resp.Header.Get("Retry-After")); ok {
-			return capDelay(retryAfter, cfg.MaxDelay)
+		if parsed, ok := parseRetryAfter(resp.Header.Get("Retry-After")); ok {
+			return capDelay(parsed, cfg.MaxDelay), parsed
 		}
 	}
 	if attempt < 0 {
@@ -108,7 +125,7 @@ func backoffDelay(resp *http.Response, cfg Config, attempt int) time.Duration {
 	backoff := cfg.BaseDelay * time.Duration(1<<attempt)
 	backoff = capDelay(backoff, cfg.MaxDelay)
 	jitter := 0.5 + rand.Float64()
-	return time.Duration(float64(backoff) * jitter)
+	return time.Duration(float64(backoff) * jitter), 0
 }
 
 func capDelay(delay, max time.Duration) time.Duration {

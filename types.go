@@ -259,9 +259,9 @@ type Response struct {
 	// blocks) in provider order. It is nil when the provider sends no
 	// reasoning_details. Use ReasoningText for the flat reasoning view.
 	ReasoningDetails []ReasoningDetail
-	// Timing carries built-in latency telemetry (Connected, FirstByte,
-	// Total) for non-streaming requests. It is nil only for providers
-	// invoked without the Client wrapper (direct Provider calls).
+	// Timing carries built-in latency and retry telemetry for non-streaming
+	// requests. It is nil only for providers invoked without the Client
+	// wrapper (direct Provider calls).
 	Timing *TimingMetrics
 	// Upstream identifies the HTTP upstream that answered: status code,
 	// response headers, and vendor-reported identity fields. It is nil for
@@ -312,21 +312,50 @@ func (r *Response) ToolCalls() []*ToolCallContent {
 	return calls
 }
 
+// RetryAttempt describes one HTTP attempt made while serving a request.
+// Attempt metadata is best-effort: a zero value always means "not
+// available", matching the rest of the timing telemetry.
+type RetryAttempt struct {
+	// StatusCode is the HTTP status returned by this attempt, or zero when
+	// the attempt failed before a response arrived.
+	StatusCode int
+	// Duration is the time from sending the request until response headers
+	// arrived, or until the transport error for a failed attempt.
+	Duration time.Duration
+	// Backoff is the delay actually slept after this attempt before the
+	// next one. It is zero when no retry followed, including on the final
+	// successful attempt.
+	Backoff time.Duration
+	// RetryAfter is the server-provided Retry-After delay for this attempt
+	// before the retry policy cap is applied. It is zero when the header was
+	// absent or invalid.
+	RetryAfter time.Duration
+	// Err is the transport error for an attempt that received no response.
+	// It is empty for attempts that got an HTTP response.
+	Err string
+}
+
 // TimingMetrics captures built-in latency telemetry for a single request,
 // so consumer applications do not have to hand-roll timestamping and
-// chunk-tracking logic. All Duration fields are measured from StartedAt.
-// A zero duration always means "not available", never "instant".
+// chunk-tracking logic. Connected, FirstByte, FirstToken, and Total are
+// measured from StartedAt; RetryDelay is the sum of the slept backoff, and
+// per-attempt durations live in Attempts. A zero duration always means
+// "not available", never "instant".
 type TimingMetrics struct {
 	// StartedAt is the moment Stream or Generate was invoked.
 	StartedAt time.Time
-	// Connected is the time until the HTTP connection was established
+	// Connected is the time until the first HTTP connection was established
 	// (httptrace GotConn), including any TLS handshake. With connection
-	// reuse it is near zero. Zero when the transport did not report it.
+	// reuse it is near zero. It records the first attempt when the request
+	// was retried. Zero when the transport did not report it.
 	Connected time.Duration
 	// FirstByte is the time until the upstream sent its first response
-	// byte (httptrace GotFirstResponseByte). When the request was retried
-	// (e.g. on 429) it reflects the successful attempt. Zero when the
-	// transport did not report it.
+	// byte (httptrace GotFirstResponseByte; response headers), measured
+	// from StartedAt so it includes any retry backoff. It reflects the
+	// latest (successful) attempt. Because it is absolute since StartedAt,
+	// FirstByte alone does not identify the successful attempt's own
+	// latency; use Attempts for that. Zero when the transport did not
+	// report it.
 	FirstByte time.Duration
 	// FirstToken is the time until the first content-bearing stream chunk
 	// (text, reasoning, or tool-call delta) was delivered — the classic
@@ -340,6 +369,16 @@ type TimingMetrics struct {
 	// Chunks is the number of content-bearing chunks observed so far. It
 	// grows on each content chunk and is final on the terminal chunk.
 	Chunks int
+	// Attempts lists every HTTP attempt in order, including the final
+	// successful one. It is empty for providers that do not use an HTTP
+	// transport. When non-empty, Retries == len(Attempts)-1.
+	Attempts []RetryAttempt
+	// Retries is the number of retried attempts. It is zero when Attempts
+	// is empty.
+	Retries int
+	// RetryDelay is the total backoff slept across the request. It is zero
+	// when no retry was made.
+	RetryDelay time.Duration
 }
 
 // StreamChunk represents a partial streaming response.
@@ -367,9 +406,9 @@ type StreamChunk struct {
 	// reports no reason or the reason cannot be mapped. It is typically set on
 	// the final content frame (not on the terminal Done frame).
 	FinishReason string
-	// Timing carries llmhub's built-in latency telemetry as a snapshot taken
-	// when this chunk was produced. It is nil only for providers invoked
-	// without the Client wrapper (direct Provider calls).
+	// Timing carries llmhub's built-in latency and retry telemetry as a
+	// snapshot taken when this chunk was produced. It is nil only for
+	// providers invoked without the Client wrapper (direct Provider calls).
 	Timing *TimingMetrics
 	// Upstream identifies the HTTP upstream that answered. Each chunk carries
 	// its own shallow snapshot; Headers is shared across chunks and read-only.

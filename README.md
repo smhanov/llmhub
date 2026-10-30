@@ -496,6 +496,12 @@ for chunk := range stream {
         t := chunk.Timing
         fmt.Printf("\nconnected: %v, first byte: %v, first token: %v, total: %v (%d chunks)\n",
             t.Connected, t.FirstByte, t.FirstToken, t.Total, t.Chunks)
+        for i, attempt := range t.Attempts {
+            fmt.Printf("  attempt %d: status=%d duration=%v backoff=%v retry-after=%v err=%q\n",
+                i+1, attempt.StatusCode, attempt.Duration, attempt.Backoff,
+                attempt.RetryAfter, attempt.Err)
+        }
+        fmt.Printf("retries: %d, retry delay: %v\n", t.Retries, t.RetryDelay)
     }
 }
 ```
@@ -503,17 +509,29 @@ for chunk := range stream {
 | Field | Meaning |
 | ----- | ------- |
 | `StartedAt` | When `Stream`/`Generate` was invoked |
-| `Connected` | Time to establish the HTTP connection (via `httptrace`), including TLS; near zero on reused connections; zero when the transport did not report it |
-| `FirstByte` | Time to the upstream's first response byte (response headers). When the request was retried (e.g. 429 backoff), it reflects the successful attempt |
+| `Connected` | Time until the **first attempt's** HTTP connection was established (via `httptrace`), including TLS; near zero on reused connections; zero when the transport did not report it |
+| `FirstByte` | Time until the upstream's first response byte (response headers), measured from `StartedAt`. It includes any retry backoff and reflects the latest (successful) attempt, so it is not the successful attempt's own latency; use `Attempts` for that |
 | `FirstToken` | **Time To First Token (TTFT)**: first content-bearing chunk (text, reasoning, or tool-call delta). Usage-only trailing frames do not count |
 | `Total` | Full stream duration; set on the terminal chunk and on `Generate` responses, zero on earlier chunks |
 | `Chunks` | Content-bearing chunks observed so far; final on the terminal chunk |
+| `Attempts` | One `RetryAttempt` per HTTP attempt in order, including the final successful one. Empty for providers that do not use an HTTP transport |
+| `Retries` | Number of retried attempts: `len(Attempts)-1` when non-empty, otherwise 0 |
+| `RetryDelay` | Total backoff slept across the request; zero when no retry was made |
 
-All durations are measured from `StartedAt`; a zero duration always means
-"not available", never "instant". Non-streaming `Generate` returns
-`Response.Timing` with `Connected`, `FirstByte`, and `Total` filled.
-`Timing` is populated by the `Client` wrapper for every built-in provider —
-call a `Provider` directly (bypassing `Client`) and it stays nil.
+Each `RetryAttempt` reports `StatusCode` (zero for a transport failure),
+`Duration` (request to response headers), `Backoff` (the delay slept after
+that attempt, zero on the final attempt), `RetryAfter` (the raw,
+uncapped `Retry-After` value when the server supplied one), and `Err` (the
+transport error, if any).
+
+`Connected`, `FirstByte`, `FirstToken`, and `Total` are measured from
+`StartedAt`; `RetryDelay` is a sum and per-attempt durations live in
+`Attempts`. A zero duration always means "not available", never "instant".
+Non-streaming `Generate` returns `Response.Timing` with `Connected`,
+`FirstByte`, `Total`, and retry telemetry filled. `Timing` is populated by the
+`Client` wrapper for every built-in provider — call a `Provider` directly
+(bypassing `Client`) and it stays nil, so direct calls never carry retry
+telemetry.
 
 ## Upstream Attribution
 

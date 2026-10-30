@@ -1,6 +1,11 @@
 package llmhub
 
-import "context"
+import (
+	"context"
+	"time"
+
+	"github.com/smhanov/llmhub/internal/telemetry"
+)
 
 // Client is the main entry point for interacting with LLM providers via the unified API.
 type Client struct {
@@ -28,6 +33,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*Message, opts ...Option
 		return nil, &Error{Provider: "", Op: "Generate", Err: ErrInvalidInput}
 	}
 	timer := newRequestTimer()
+	ctx, session := telemetry.WithSession(ctx)
 	ctx = timer.trace(ctx)
 	merged := mergeOptions(c.defaultOpts, opts)
 	resp, err := c.provider.Generate(ctx, prompt, merged...)
@@ -35,7 +41,9 @@ func (c *Client) Generate(ctx context.Context, prompt []*Message, opts ...Option
 		return nil, &Error{Provider: c.provider.Name(), Op: "Generate", Err: err}
 	}
 	computeCost(resp, merged)
-	resp.Timing = timer.snapshot(true)
+	timing := timer.snapshot(true)
+	applyRetryTelemetry(timing, session)
+	resp.Timing = timing
 	return resp, nil
 }
 
@@ -63,13 +71,43 @@ func (c *Client) Stream(ctx context.Context, prompt []*Message, opts ...Option) 
 		return nil, &Error{Provider: "", Op: "Stream", Err: ErrInvalidInput}
 	}
 	timer := newRequestTimer()
+	ctx, session := telemetry.WithSession(ctx)
 	ctx = timer.trace(ctx)
 	merged := mergeOptions(c.defaultOpts, opts)
 	ch, err := c.provider.Stream(ctx, prompt, merged...)
 	if err != nil {
 		return nil, &Error{Provider: c.provider.Name(), Op: "Stream", Err: err}
 	}
-	return instrumentStream(timer, ch), nil
+	return instrumentStream(timer, ch, session), nil
+}
+
+// applyRetryTelemetry converts recorded attempts into their public shape and
+// merges them into the timing snapshot. It is a no-op without a session or
+// recorded attempts, which keeps direct Provider calls and non-HTTP
+// providers unchanged.
+func applyRetryTelemetry(m *TimingMetrics, s *telemetry.Session) {
+	if m == nil {
+		return
+	}
+	records := s.Attempts()
+	if len(records) == 0 {
+		return
+	}
+	attempts := make([]RetryAttempt, len(records))
+	var retryDelay time.Duration
+	for i, record := range records {
+		attempts[i] = RetryAttempt{
+			StatusCode: record.StatusCode,
+			Duration:   record.Duration,
+			Backoff:    record.Backoff,
+			RetryAfter: record.RetryAfter,
+			Err:        record.Err,
+		}
+		retryDelay += record.Backoff
+	}
+	m.Attempts = attempts
+	m.Retries = len(attempts) - 1
+	m.RetryDelay = retryDelay
 }
 
 // instrumentStream forwards provider chunks to a new channel, attaching a
@@ -77,7 +115,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*Message, opts ...Option) 
 // locking is required. Content-bearing chunks (text, reasoning, tool-call
 // deltas) mark TTFT and the chunk counter; usage-only and terminal-only
 // frames do not count as content.
-func instrumentStream(timer *requestTimer, ch <-chan StreamChunk) <-chan StreamChunk {
+func instrumentStream(timer *requestTimer, ch <-chan StreamChunk, session *telemetry.Session) <-chan StreamChunk {
 	out := make(chan StreamChunk)
 	go func() {
 		defer close(out)
@@ -90,7 +128,9 @@ func instrumentStream(timer *requestTimer, ch <-chan StreamChunk) <-chan StreamC
 				timer.markContent()
 			}
 			terminal := chunk.Done || chunk.Err != nil
-			chunk.Timing = timer.snapshot(terminal)
+			timing := timer.snapshot(terminal)
+			applyRetryTelemetry(timing, session)
+			chunk.Timing = timing
 			out <- chunk
 			if terminal {
 				return
@@ -100,7 +140,9 @@ func instrumentStream(timer *requestTimer, ch <-chan StreamChunk) <-chan StreamC
 		// built-in lane does this, but third-party providers might; emit
 		// one so consumers can always read Total from a final chunk. Carry
 		// the last observed upstream snapshot when the provider sent one.
-		synthetic := StreamChunk{Done: true, Timing: timer.snapshot(true)}
+		timing := timer.snapshot(true)
+		applyRetryTelemetry(timing, session)
+		synthetic := StreamChunk{Done: true, Timing: timing}
 		if lastUpstream != nil {
 			snapshot := *lastUpstream
 			synthetic.Upstream = &snapshot
