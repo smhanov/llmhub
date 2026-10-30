@@ -229,7 +229,44 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			}
 			var streamResp streamResponse
 			if err := json.Unmarshal([]byte(data), &streamResp); err != nil {
+				if event.Name == "error" {
+					chunks <- llmhub.StreamChunk{
+						Err:  &llmhub.StreamError{Provider: c.providerName, Message: data},
+						Done: true,
+					}
+					return
+				}
 				chunks <- llmhub.StreamChunk{Err: err, Done: true}
+				return
+			}
+
+			// A frame carrying a provider error is terminal. Check it before
+			// the content filter so an error-only frame is never dropped as
+			// an empty completion.
+			if streamResp.Error != nil {
+				chunks <- llmhub.StreamChunk{
+					Err:  streamErrorFromPayload(c.providerName, streamResp.Error),
+					Done: true,
+				}
+				return
+			}
+			// Some routers signal errors with an `event: error` frame and no
+			// body-level error object. Parse the frame data as the error
+			// payload; fall back to the raw data when it is not shaped that
+			// way, and never also treat the frame as a completion delta.
+			if event.Name == "error" {
+				var payload streamErrorPayload
+				if err := json.Unmarshal([]byte(data), &payload); err == nil && payload.hasContent() {
+					chunks <- llmhub.StreamChunk{
+						Err:  streamErrorFromPayload(c.providerName, &payload),
+						Done: true,
+					}
+					return
+				}
+				chunks <- llmhub.StreamChunk{
+					Err:  &llmhub.StreamError{Provider: c.providerName, Message: data},
+					Done: true,
+				}
 				return
 			}
 
@@ -925,6 +962,60 @@ type streamResponse struct {
 		FinishReason string `json:"finish_reason,omitempty"`
 	} `json:"choices"`
 	Usage *usageBlock `json:"usage,omitempty"`
+	// Error carries a provider-reported failure frame. OpenAI-compatible
+	// servers emit these either instead of, or after, normal deltas.
+	Error *streamErrorPayload `json:"error,omitempty"`
+}
+
+// streamErrorPayload mirrors the OpenAI error object as it appears inside a
+// streaming frame. Code is raw because providers variously send a string, a
+// number, or null.
+type streamErrorPayload struct {
+	Message string          `json:"message"`
+	Type    string          `json:"type,omitempty"`
+	Code    json.RawMessage `json:"code,omitempty"`
+	Param   string          `json:"param,omitempty"`
+}
+
+// hasContent reports whether the payload carries any provider detail, so an
+// empty object falls back to the raw frame data instead of reporting nothing.
+func (p *streamErrorPayload) hasContent() bool {
+	if p == nil {
+		return false
+	}
+	return p.Message != "" || p.Type != "" || p.Param != "" || normalizeStreamErrorCode(p.Code) != ""
+}
+
+// streamErrorFromPayload converts an OpenAI-compatible error object into the
+// public typed error, normalizing the code to a string.
+func streamErrorFromPayload(provider string, p *streamErrorPayload) *llmhub.StreamError {
+	if p == nil {
+		return &llmhub.StreamError{Provider: provider}
+	}
+	return &llmhub.StreamError{
+		Provider: provider,
+		Message:  p.Message,
+		Type:     p.Type,
+		Code:     normalizeStreamErrorCode(p.Code),
+		Param:    p.Param,
+	}
+}
+
+// normalizeStreamErrorCode renders a JSON code as a plain string: strings are
+// unquoted, numbers and other scalars keep their literal form, and null or an
+// absent value becomes the empty string.
+func normalizeStreamErrorCode(raw json.RawMessage) string {
+	value := strings.TrimSpace(string(raw))
+	if value == "" || value == "null" {
+		return ""
+	}
+	if value[0] == '"' {
+		var decoded string
+		if err := json.Unmarshal(raw, &decoded); err == nil {
+			return decoded
+		}
+	}
+	return value
 }
 
 type modelsResponse struct {

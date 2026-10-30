@@ -74,6 +74,29 @@ for chunk := range stream {
 }
 ```
 
+Provider failures reported after streaming has begun arrive as a terminal
+`StreamChunk` with `Err` set and `Done == true`. The error keeps the
+provider's message, type, code, and parameter when the upstream supplies
+them, and can be inspected with `errors.As`:
+
+```go
+for chunk := range stream {
+    if chunk.Err != nil {
+        var streamErr *llmhub.StreamError
+        if errors.As(chunk.Err, &streamErr) {
+            log.Printf("%s failed: %s (type=%s code=%s param=%s)",
+                streamErr.Provider, streamErr.Message, streamErr.Type, streamErr.Code, streamErr.Param)
+        }
+        break
+    }
+    fmt.Print(chunk.Delta)
+}
+```
+
+Content received before the error is still valid partial output. A stream
+that simply ends without an error frame is treated as a normal completion,
+even when the upstream omits the `[DONE]` sentinel.
+
 ## Vision & Multi-modal Inputs
 
 ```go

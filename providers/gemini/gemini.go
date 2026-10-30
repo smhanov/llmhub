@@ -178,6 +178,10 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			}
 			pending.Reset()
 			for _, current := range parsed {
+				if current.Error != nil {
+					ch <- llmhub.StreamChunk{Err: streamErrorFromGemini(current.Error), Done: true}
+					return
+				}
 				text, reasoning, toolCalls, finishReason, err := extractContent(current.Candidates)
 				if err != nil {
 					ch <- llmhub.StreamChunk{Err: err, Done: true}
@@ -607,6 +611,53 @@ type thinkingConfig struct {
 type geminiResponse struct {
 	Candidates []candidate   `json:"candidates"`
 	Usage      usageMetadata `json:"usageMetadata"`
+	// Error carries a provider-reported failure frame. Gemini can emit an
+	// error-only object mid-stream instead of a candidate.
+	Error *geminiError `json:"error,omitempty"`
+}
+
+// geminiError mirrors Google's error object. Code is raw because Gemini sends
+// a numeric HTTP-style status code.
+type geminiError struct {
+	Message string          `json:"message"`
+	Type    string          `json:"type,omitempty"`
+	Status  string          `json:"status,omitempty"`
+	Code    json.RawMessage `json:"code,omitempty"`
+	Param   string          `json:"param,omitempty"`
+}
+
+// streamErrorFromGemini converts Google's error object into the public typed
+// error, normalizing the numeric code to a string. Google often reports a
+// status (RESOURCE_EXHAUSTED) where other lanes report a type.
+func streamErrorFromGemini(errPayload *geminiError) *llmhub.StreamError {
+	if errPayload == nil {
+		return &llmhub.StreamError{Provider: providerName}
+	}
+	errorType := errPayload.Type
+	if errorType == "" {
+		errorType = errPayload.Status
+	}
+	return &llmhub.StreamError{
+		Provider: providerName,
+		Message:  errPayload.Message,
+		Type:     errorType,
+		Code:     normalizeGeminiErrorCode(errPayload.Code),
+		Param:    errPayload.Param,
+	}
+}
+
+func normalizeGeminiErrorCode(raw json.RawMessage) string {
+	value := strings.TrimSpace(string(raw))
+	if value == "" || value == "null" {
+		return ""
+	}
+	if value[0] == '"' {
+		var decoded string
+		if err := json.Unmarshal(raw, &decoded); err == nil {
+			return decoded
+		}
+	}
+	return value
 }
 
 type candidate struct {

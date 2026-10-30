@@ -3,6 +3,7 @@ package gemini
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -308,6 +309,57 @@ func TestGeminiStreamArrayPayload(t *testing.T) {
 	first := <-stream
 	if first.Delta != "hello" {
 		t.Fatalf("unexpected chunk: %+v", first)
+	}
+}
+
+func TestGeminiStreamErrorFrame(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, `{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}`)
+		// Error-only frame: before the fix this decoded as an empty
+		// geminiResponse and was dropped, closing the stream cleanly.
+		fmt.Fprintln(w, `{"error":{"code":429,"message":"quota exceeded","status":"RESOURCE_EXHAUSTED"}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("secret", llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+
+	var chunks []llmhub.StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected partial content plus terminal error, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Delta != "partial" || chunks[0].Err != nil {
+		t.Fatalf("expected partial content before the error, got %+v", chunks[0])
+	}
+	terminal := chunks[1]
+	if !terminal.Done || terminal.Err == nil {
+		t.Fatalf("expected Done=true with Err set, got %+v", terminal)
+	}
+
+	var streamErr *llmhub.StreamError
+	if !errors.As(terminal.Err, &streamErr) {
+		t.Fatalf("expected *llmhub.StreamError, got %T: %v", terminal.Err, terminal.Err)
+	}
+	if streamErr.Provider != "gemini" {
+		t.Fatalf("expected provider gemini, got %q", streamErr.Provider)
+	}
+	if streamErr.Message != "quota exceeded" {
+		t.Fatalf("expected message quota exceeded, got %q", streamErr.Message)
+	}
+	if streamErr.Type != "RESOURCE_EXHAUSTED" {
+		t.Fatalf("expected status mapped to type, got %q", streamErr.Type)
+	}
+	if streamErr.Code != "429" {
+		t.Fatalf("expected numeric code normalized to %q, got %q", "429", streamErr.Code)
 	}
 }
 

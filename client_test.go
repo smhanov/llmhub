@@ -194,3 +194,46 @@ func TestClientStream(t *testing.T) {
 		t.Fatalf("unexpected stream result: %s", combined.String())
 	}
 }
+
+func TestClientStreamErrorChunkKeepsTiming(t *testing.T) {
+	streamErr := &StreamError{Provider: "stub", Message: "upstream failed", Type: "server_error", Code: "500"}
+	stub := &testProvider{
+		name: "stub",
+		streamFn: func(ctx context.Context, prompt []*Message, opts ...Option) (<-chan StreamChunk, error) {
+			ch := make(chan StreamChunk, 2)
+			ch <- StreamChunk{Delta: "partial"}
+			ch <- StreamChunk{Err: streamErr, Done: true}
+			close(ch)
+			return ch, nil
+		},
+	}
+	client := Wrap(stub)
+	stream, err := client.Stream(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+
+	var terminal *StreamChunk
+	for chunk := range stream {
+		if chunk.Done || chunk.Err != nil {
+			c := chunk
+			terminal = &c
+			break
+		}
+	}
+	if terminal == nil {
+		t.Fatal("expected a terminal chunk")
+	}
+	if !terminal.Done || terminal.Err == nil {
+		t.Fatalf("expected Done=true with Err set, got %+v", terminal)
+	}
+	if terminal.Timing == nil {
+		t.Fatal("expected Timing on the terminal error chunk")
+	}
+	if terminal.Timing.Total <= 0 {
+		t.Fatalf("expected Timing.Total on the terminal error chunk, got %+v", terminal.Timing)
+	}
+	if terminal.Timing.Chunks != 1 {
+		t.Fatalf("expected one content-bearing chunk counted, got %d", terminal.Timing.Chunks)
+	}
+}

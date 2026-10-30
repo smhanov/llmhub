@@ -144,7 +144,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				return
 			}
 			if chunk.Error != "" {
-				ch <- llmhub.StreamChunk{Err: fmt.Errorf("ollama: %s", chunk.Error), Done: true}
+				ch <- llmhub.StreamChunk{Err: &llmhub.StreamError{Provider: providerName, Message: chunk.Error}, Done: true}
 				return
 			}
 			text := chunk.Message.Content

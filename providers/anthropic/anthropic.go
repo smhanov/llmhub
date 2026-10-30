@@ -249,7 +249,13 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				if err := json.Unmarshal([]byte(event.Data), &payload); err != nil {
 					ch <- llmhub.StreamChunk{Err: err, Done: true}
 				} else {
-					ch <- llmhub.StreamChunk{Err: errors.New(payload.Error.Message), Done: true}
+					ch <- llmhub.StreamChunk{Err: &llmhub.StreamError{
+						Provider: providerName,
+						Message:  payload.Error.Message,
+						Type:     payload.Error.Type,
+						Code:     payload.Error.Code,
+						Param:    payload.Error.Param,
+					}, Done: true}
 				}
 				return
 			default:
@@ -650,6 +656,9 @@ type anthropicContentBlockStopEvent struct {
 type anthropicErrorEvent struct {
 	Error struct {
 		Message string `json:"message"`
+		Type    string `json:"type,omitempty"`
+		Code    string `json:"code,omitempty"`
+		Param   string `json:"param,omitempty"`
 	} `json:"error"`
 }
 

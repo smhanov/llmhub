@@ -3,6 +3,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -576,6 +577,62 @@ func TestAnthropicStreamReasoning(t *testing.T) {
 	chunk := <-stream
 	if chunk.ReasoningDelta != "draft" {
 		t.Fatalf("unexpected reasoning delta: %+v", chunk)
+	}
+}
+
+func TestAnthropicStreamErrorEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"delta\":{\"text\":\"partial\"}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\",\"code\":\"overloaded\",\"param\":\"model\"}}\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := New("key", llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("hi"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+
+	var chunks []llmhub.StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected partial content plus terminal error, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Delta != "partial" {
+		t.Fatalf("expected partial content before the error, got %+v", chunks[0])
+	}
+	terminal := chunks[1]
+	if !terminal.Done || terminal.Err == nil {
+		t.Fatalf("expected Done=true with Err set, got %+v", terminal)
+	}
+
+	var streamErr *llmhub.StreamError
+	if !errors.As(terminal.Err, &streamErr) {
+		t.Fatalf("expected *llmhub.StreamError, got %T: %v", terminal.Err, terminal.Err)
+	}
+	if streamErr.Provider != "anthropic" {
+		t.Fatalf("expected provider anthropic, got %q", streamErr.Provider)
+	}
+	if streamErr.Message != "Overloaded" {
+		t.Fatalf("expected message Overloaded, got %q", streamErr.Message)
+	}
+	if streamErr.Type != "overloaded_error" {
+		t.Fatalf("expected error type to survive, got %q", streamErr.Type)
+	}
+	if streamErr.Code != "overloaded" {
+		t.Fatalf("expected error code to survive, got %q", streamErr.Code)
+	}
+	if streamErr.Param != "model" {
+		t.Fatalf("expected error param to survive, got %q", streamErr.Param)
 	}
 }
 

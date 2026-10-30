@@ -3,6 +3,7 @@ package ollama
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -374,5 +375,45 @@ func TestOllamaStreamDoneReason(t *testing.T) {
 	}
 	if chunks[len(chunks)-1].FinishReason != "length" {
 		t.Fatalf("expected length finish reason, got %+v", chunks[len(chunks)-1])
+	}
+}
+
+func TestOllamaStreamErrorIsTyped(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"message":{"role":"assistant","content":"partial"},"done":false}`+"\n")
+		io.WriteString(w, `{"error":"model crashed"}`+"\n")
+	}))
+	defer server.Close()
+
+	provider, err := New("", llmhub.WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("ping"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+
+	var chunks []llmhub.StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected partial content plus terminal error, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Delta != "partial" {
+		t.Fatalf("expected partial content before the error, got %+v", chunks[0])
+	}
+	terminal := chunks[1]
+	if !terminal.Done || terminal.Err == nil {
+		t.Fatalf("expected Done=true with Err set, got %+v", terminal)
+	}
+	var streamErr *llmhub.StreamError
+	if !errors.As(terminal.Err, &streamErr) {
+		t.Fatalf("expected *llmhub.StreamError, got %T: %v", terminal.Err, terminal.Err)
+	}
+	if streamErr.Provider != "ollama" || streamErr.Message != "model crashed" {
+		t.Fatalf("unexpected error payload: %+v", streamErr)
 	}
 }

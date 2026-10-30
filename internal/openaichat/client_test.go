@@ -3,6 +3,7 @@ package openaichat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1174,5 +1175,301 @@ func TestBuildRequestPayload_ToolChoiceSurvivesSplitOptions(t *testing.T) {
 	}
 	if string(decoded["tool_choice"]) != `"auto"` {
 		t.Fatalf("expected tool_choice 'auto' after per-request tools, got %s", string(decoded["tool_choice"]))
+	}
+}
+
+// newStreamTestClient builds a client pointed at an httptest server for a
+// given lane name. The shared OpenAI-compatible client is reused by openai,
+// openrouter, xai, and zai, so the name must survive into the reported error.
+func newStreamTestClient(server *httptest.Server, providerName string) *Client {
+	return NewClient(ClientConfig{
+		ProviderName: providerName,
+		BaseConfig: llmhub.NewConfig(
+			llmhub.WithBaseURL(server.URL),
+			llmhub.WithHTTPClient(server.Client()),
+			llmhub.WithAPIKey("test-key"),
+			llmhub.WithModel("test-model"),
+		),
+	})
+}
+
+func collectStream(t *testing.T, ch <-chan llmhub.StreamChunk) []llmhub.StreamChunk {
+	t.Helper()
+	var chunks []llmhub.StreamChunk
+	for chunk := range ch {
+		chunks = append(chunks, chunk)
+	}
+	return chunks
+}
+
+func TestClientStream_MidStreamErrorFrame(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "response writer does not flush", http.StatusInternalServerError)
+			return
+		}
+
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+		flusher.Flush()
+
+		// Error-only frame, followed by no [DONE]: the historical failure
+		// mode closed the stream as a clean empty finish.
+		fmt.Fprintf(w, "data: {\"error\":{\"message\":\"upstream overloaded\",\"type\":\"server_error\",\"code\":\"overloaded\",\"param\":\"model\"}}\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	chunksCh, err := newStreamTestClient(server, "test-provider").Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks (partial content + terminal error), got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Delta != "partial" || chunks[0].Err != nil || chunks[0].Done {
+		t.Fatalf("expected partial content before the error, got %+v", chunks[0])
+	}
+
+	terminal := chunks[1]
+	if !terminal.Done {
+		t.Fatalf("expected terminal chunk Done=true, got %+v", terminal)
+	}
+	if terminal.FinishReason != "" {
+		t.Fatalf("expected error chunk to carry no finish reason, got %q", terminal.FinishReason)
+	}
+	if terminal.Err == nil {
+		t.Fatal("expected terminal chunk to carry the provider error, got nil")
+	}
+
+	var streamErr *llmhub.StreamError
+	if !errors.As(terminal.Err, &streamErr) {
+		t.Fatalf("expected *llmhub.StreamError, got %T: %v", terminal.Err, terminal.Err)
+	}
+	if streamErr.Provider != "test-provider" {
+		t.Fatalf("expected provider test-provider, got %q", streamErr.Provider)
+	}
+	if streamErr.Message != "upstream overloaded" {
+		t.Fatalf("expected message upstream overloaded, got %q", streamErr.Message)
+	}
+	if streamErr.Type != "server_error" {
+		t.Fatalf("expected type server_error, got %q", streamErr.Type)
+	}
+	if streamErr.Code != "overloaded" {
+		t.Fatalf("expected code overloaded, got %q", streamErr.Code)
+	}
+	if streamErr.Param != "model" {
+		t.Fatalf("expected param model, got %q", streamErr.Param)
+	}
+	wantText := "test-provider: upstream overloaded (type=server_error, code=overloaded)"
+	if streamErr.Error() != wantText {
+		t.Fatalf("expected error text %q, got %q", wantText, streamErr.Error())
+	}
+}
+
+func TestClientStream_ErrorEventName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "response writer does not flush", http.StatusInternalServerError)
+			return
+		}
+
+		// Some routers send an `event: error` frame whose data is the error
+		// object itself, with no top-level `error` wrapper.
+		fmt.Fprintf(w, "event: error\ndata: {\"message\":\"bad gateway\",\"type\":\"server_error\",\"code\":\"bad_gateway\"}\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	chunksCh, err := newStreamTestClient(server, "test-provider").Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 terminal chunk, got %d: %+v", len(chunks), chunks)
+	}
+	if !chunks[0].Done || chunks[0].Err == nil {
+		t.Fatalf("expected Done=true with Err set, got %+v", chunks[0])
+	}
+	var streamErr *llmhub.StreamError
+	if !errors.As(chunks[0].Err, &streamErr) {
+		t.Fatalf("expected *llmhub.StreamError, got %T: %v", chunks[0].Err, chunks[0].Err)
+	}
+	if streamErr.Provider != "test-provider" || streamErr.Message != "bad gateway" {
+		t.Fatalf("unexpected error payload: %+v", streamErr)
+	}
+	if streamErr.Type != "server_error" || streamErr.Code != "bad_gateway" {
+		t.Fatalf("expected type/code to survive, got %+v", streamErr)
+	}
+}
+
+func TestClientStream_ErrorEventNameFallbackToRawData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "event: error\ndata: upstream unavailable\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	chunksCh, err := newStreamTestClient(server, "test-provider").Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 1 || !chunks[0].Done || chunks[0].Err == nil {
+		t.Fatalf("expected one terminal error chunk, got %+v", chunks)
+	}
+	var streamErr *llmhub.StreamError
+	if !errors.As(chunks[0].Err, &streamErr) {
+		t.Fatalf("expected *llmhub.StreamError, got %T: %v", chunks[0].Err, chunks[0].Err)
+	}
+	if streamErr.Message != "upstream unavailable" {
+		t.Fatalf("expected raw frame data as message, got %q", streamErr.Message)
+	}
+}
+
+func TestClientStream_ErrorFrameWithUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: {\"error\":{\"message\":\"model failed\",\"type\":\"server_error\"},\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":0,\"total_tokens\":5}}\n\n")
+		flusher.Flush()
+		// An error still wins even if the body later completes normally.
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	chunksCh, err := newStreamTestClient(server, "test-provider").Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 1 {
+		t.Fatalf("expected a single terminal error chunk, got %d: %+v", len(chunks), chunks)
+	}
+	if !chunks[0].Done || chunks[0].Err == nil {
+		t.Fatalf("expected Done=true with Err set, got %+v", chunks[0])
+	}
+	// Usage on the error frame is intentionally not retained: the error wins
+	// and the frame is not treated as a completion delta.
+	if chunks[0].Usage != nil {
+		t.Fatalf("expected no usage on the error chunk, got %+v", chunks[0].Usage)
+	}
+}
+
+func TestClientStream_ErrorCodeNumeric(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: {\"error\":{\"message\":\"rate limited\",\"code\":429}}\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	chunksCh, err := newStreamTestClient(server, "test-provider").Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 1 || chunks[0].Err == nil {
+		t.Fatalf("expected one terminal error chunk, got %+v", chunks)
+	}
+	var streamErr *llmhub.StreamError
+	if !errors.As(chunks[0].Err, &streamErr) {
+		t.Fatalf("expected *llmhub.StreamError, got %T: %v", chunks[0].Err, chunks[0].Err)
+	}
+	if streamErr.Code != "429" {
+		t.Fatalf("expected numeric code normalized to %q, got %q", "429", streamErr.Code)
+	}
+}
+
+func TestClientStream_ErrorProviderLaneParity(t *testing.T) {
+	// The four OpenAI-compatible lanes share this client; each must report
+	// itself as the failing provider.
+	for _, lane := range []string{"openai", "openrouter", "xai", "zai"} {
+		t.Run(lane, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				flusher, _ := w.(http.Flusher)
+				fmt.Fprintf(w, "data: {\"error\":{\"message\":\"upstream failed\",\"type\":\"server_error\"}}\n\n")
+				flusher.Flush()
+			}))
+			defer server.Close()
+
+			chunksCh, err := newStreamTestClient(server, lane).Stream(context.Background(), []*llmhub.Message{
+				llmhub.NewUserMessage(llmhub.Text("Hi")),
+			})
+			if err != nil {
+				t.Fatalf("Stream failed: %v", err)
+			}
+			chunks := collectStream(t, chunksCh)
+			if len(chunks) != 1 || chunks[0].Err == nil {
+				t.Fatalf("expected one terminal error chunk, got %+v", chunks)
+			}
+			var streamErr *llmhub.StreamError
+			if !errors.As(chunks[0].Err, &streamErr) {
+				t.Fatalf("expected *llmhub.StreamError, got %T: %v", chunks[0].Err, chunks[0].Err)
+			}
+			if streamErr.Provider != lane {
+				t.Fatalf("expected Provider %q, got %q", lane, streamErr.Provider)
+			}
+		})
+	}
+}
+
+func TestClientStream_CleanStreamUnaffectedByErrorHandling(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: {\"id\":\"x\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	chunksCh, err := newStreamTestClient(server, "test-provider").Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("Hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Delta != "Hello" {
+		t.Fatalf("unexpected first chunk: %+v", chunks[0])
+	}
+	if chunks[1].FinishReason != "stop" || chunks[1].Usage == nil || chunks[1].Usage.TotalTokens != 3 {
+		t.Fatalf("unexpected finish/usage chunk: %+v", chunks[1])
+	}
+	if !chunks[2].Done || chunks[2].Err != nil {
+		t.Fatalf("expected clean terminal chunk, got %+v", chunks[2])
 	}
 }
