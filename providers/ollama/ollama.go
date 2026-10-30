@@ -84,8 +84,12 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 		return nil, fmt.Errorf("ollama: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	upstream := newUpstreamInfo(resp)
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 	var decoded chatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return nil, err
 	}
 	if decoded.Error != "" {
@@ -117,6 +121,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 			Cost:             cost,
 		},
 		Upstream: upstream,
+		RawJSON:  raw,
 		Raw:      decoded,
 	}, nil
 }
@@ -170,14 +175,14 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			}
 			var chunk chatResponse
 			if err := json.Unmarshal([]byte(line), &chunk); err != nil {
-				ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
+				ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true, RawJSON: []byte(line)})
 				return
 			}
 			if chunk.Model != "" {
 				upstream.Model = chunk.Model
 			}
 			if chunk.Error != "" {
-				ch <- withUpstream(llmhub.StreamChunk{Err: &llmhub.StreamError{Provider: providerName, Message: chunk.Error}, Done: true})
+				ch <- withUpstream(llmhub.StreamChunk{Err: &llmhub.StreamError{Provider: providerName, Message: chunk.Error}, Done: true, RawJSON: []byte(line)})
 				return
 			}
 			text := chunk.Message.Content
@@ -193,6 +198,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 					Delta:          text,
 					ReasoningDelta: chunk.Message.Thinking,
 					ToolCalls:      toolCallsFromAPI(chunk.Message.ToolCalls),
+					RawJSON:        []byte(line),
 				}):
 				}
 			} else if chunk.Message.Thinking != "" {
@@ -200,14 +206,14 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				case <-ctx.Done():
 					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- withUpstream(llmhub.StreamChunk{ReasoningDelta: chunk.Message.Thinking}):
+				case ch <- withUpstream(llmhub.StreamChunk{ReasoningDelta: chunk.Message.Thinking, RawJSON: []byte(line)}):
 				}
 			} else if len(chunk.Message.ToolCalls) > 0 {
 				select {
 				case <-ctx.Done():
 					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- withUpstream(llmhub.StreamChunk{ToolCalls: toolCallsFromAPI(chunk.Message.ToolCalls)}):
+				case ch <- withUpstream(llmhub.StreamChunk{ToolCalls: toolCallsFromAPI(chunk.Message.ToolCalls), RawJSON: []byte(line)}):
 				}
 			}
 			if chunk.Done {

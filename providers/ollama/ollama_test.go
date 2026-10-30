@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -512,5 +513,64 @@ func TestOllamaStreamUpstreamInfo(t *testing.T) {
 	}
 	if chunks[0].Upstream == chunks[1].Upstream {
 		t.Fatal("expected a distinct Upstream snapshot per chunk")
+	}
+}
+
+func TestOllamaGenerateRawJSON(t *testing.T) {
+	const body = `{"model":"llama-resolved","vendor_only":{"keep":true},"message":{"role":"assistant","content":"pong"},"prompt_eval_count":1,"eval_count":1,"done":true}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, body)
+	}))
+	defer server.Close()
+
+	provider, err := New("", llmhub.WithBaseURL(server.URL), llmhub.WithModel("local"))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	resp, err := provider.Generate(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("ping"))})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if got := string(resp.RawJSON); got != body {
+		t.Fatalf("RawJSON = %q, want exact body %q", got, body)
+	}
+	if !strings.Contains(string(resp.RawJSON), `"vendor_only"`) {
+		t.Fatalf("RawJSON dropped an unknown field: %s", resp.RawJSON)
+	}
+	if resp.Text() != "pong" {
+		t.Fatalf("Text = %q, want pong", resp.Text())
+	}
+}
+
+func TestOllamaStreamRawJSON(t *testing.T) {
+	const frame = `{"model":"llama-resolved","message":{"role":"assistant","content":"hello"},"done":false}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, frame)
+		fmt.Fprintln(w, `{"model":"llama-resolved","done":true,"done_reason":"stop"}`)
+	}))
+	defer server.Close()
+
+	provider, err := New("", llmhub.WithBaseURL(server.URL), llmhub.WithModel("local"))
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Stream(context.Background(), []*llmhub.Message{llmhub.NewUserMessage(llmhub.Text("ping"))})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	var chunks []llmhub.StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if got := string(chunks[0].RawJSON); got != frame {
+		t.Fatalf("RawJSON = %q, want %q", got, frame)
+	}
+	if chunks[1].RawJSON != nil {
+		t.Fatalf("Done chunk RawJSON = %q, want nil", chunks[1].RawJSON)
 	}
 }

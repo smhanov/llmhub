@@ -134,8 +134,12 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	}
 	upstream := newUpstreamInfo(httpResp)
 
+	raw, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, err
+	}
 	var decoded completionResponse
-	if err := json.NewDecoder(httpResp.Body).Decode(&decoded); err != nil {
+	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return nil, err
 	}
 	if len(decoded.Choices) == 0 {
@@ -166,6 +170,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 		ReasoningDetails: details,
 		Usage:            usageFromBlock(decoded.Usage),
 		Upstream:         upstream,
+		RawJSON:          raw,
 		Raw:              decoded,
 	}
 	return resp, nil
@@ -271,12 +276,13 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			if err := json.Unmarshal([]byte(data), &streamResp); err != nil {
 				if event.Name == "error" {
 					chunks <- withUpstream(llmhub.StreamChunk{
-						Err:  &llmhub.StreamError{Provider: c.providerName, Message: data},
-						Done: true,
+						Err:     &llmhub.StreamError{Provider: c.providerName, Message: data},
+						Done:    true,
+						RawJSON: []byte(data),
 					})
 					return
 				}
-				chunks <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
+				chunks <- withUpstream(llmhub.StreamChunk{Err: err, Done: true, RawJSON: []byte(data)})
 				return
 			}
 
@@ -298,8 +304,9 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			// an empty completion.
 			if streamResp.Error != nil {
 				chunks <- withUpstream(llmhub.StreamChunk{
-					Err:  streamErrorFromPayload(c.providerName, streamResp.Error),
-					Done: true,
+					Err:     streamErrorFromPayload(c.providerName, streamResp.Error),
+					Done:    true,
+					RawJSON: []byte(data),
 				})
 				return
 			}
@@ -311,14 +318,16 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				var payload streamErrorPayload
 				if err := json.Unmarshal([]byte(data), &payload); err == nil && payload.hasContent() {
 					chunks <- withUpstream(llmhub.StreamChunk{
-						Err:  streamErrorFromPayload(c.providerName, &payload),
-						Done: true,
+						Err:     streamErrorFromPayload(c.providerName, &payload),
+						Done:    true,
+						RawJSON: []byte(data),
 					})
 					return
 				}
 				chunks <- withUpstream(llmhub.StreamChunk{
-					Err:  &llmhub.StreamError{Provider: c.providerName, Message: data},
-					Done: true,
+					Err:     &llmhub.StreamError{Provider: c.providerName, Message: data},
+					Done:    true,
+					RawJSON: []byte(data),
 				})
 				return
 			}
@@ -340,12 +349,12 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				var err error
 				deltaText, reasoningDelta, err = ExtractDeltaContent(streamResp.Choices[0].Delta.Content)
 				if err != nil {
-					chunks <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
+					chunks <- withUpstream(llmhub.StreamChunk{Err: err, Done: true, RawJSON: []byte(data)})
 					return
 				}
 				reasoningDetails, err = decodeReasoningDetails(streamResp.Choices[0].Delta.ReasoningDetails)
 				if err != nil {
-					chunks <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
+					chunks <- withUpstream(llmhub.StreamChunk{Err: err, Done: true, RawJSON: []byte(data)})
 					return
 				}
 				flatReasoning := FirstNonEmpty(streamResp.Choices[0].Delta.ReasoningContent, streamResp.Choices[0].Delta.Reasoning)
@@ -366,6 +375,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				return
 			case chunks <- withUpstream(llmhub.StreamChunk{
 				ID:               streamResp.ID,
+				RawJSON:          []byte(data),
 				Delta:            deltaText,
 				ReasoningDelta:   reasoningDelta,
 				ReasoningDetails: reasoningDetails,

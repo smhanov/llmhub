@@ -101,8 +101,12 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	}
 	upstream := newUpstreamInfo(resp)
 
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 	var decoded geminiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return nil, err
 	}
 	parts, err := convertCandidate(decoded.Candidates)
@@ -126,6 +130,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 			Cost:             cost,
 		},
 		Upstream: upstream,
+		RawJSON:  raw,
 		Raw:      decoded,
 	}, nil
 }
@@ -200,7 +205,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 					continue
 				}
 				if err := json.Unmarshal([]byte(payload), &parsed); err != nil {
-					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
+					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true, RawJSON: []byte(payload)})
 					return
 				}
 			} else {
@@ -212,12 +217,12 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 					upstream.Model = current.ModelVersion
 				}
 				if current.Error != nil {
-					ch <- withUpstream(llmhub.StreamChunk{Err: streamErrorFromGemini(current.Error), Done: true})
+					ch <- withUpstream(llmhub.StreamChunk{Err: streamErrorFromGemini(current.Error), Done: true, RawJSON: []byte(payload)})
 					return
 				}
 				text, reasoning, toolCalls, finishReason, err := extractContent(current.Candidates)
 				if err != nil {
-					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
+					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true, RawJSON: []byte(payload)})
 					return
 				}
 				if text == "" && reasoning == "" && len(toolCalls) == 0 && finishReason == "" {
@@ -227,7 +232,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				case <-ctx.Done():
 					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- withUpstream(llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning, ToolCalls: toolCalls, FinishReason: finishReason}):
+				case ch <- withUpstream(llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning, ToolCalls: toolCalls, FinishReason: finishReason, RawJSON: []byte(payload)}):
 				}
 			}
 		}

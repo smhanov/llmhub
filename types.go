@@ -267,7 +267,14 @@ type Response struct {
 	// response headers, and vendor-reported identity fields. It is nil for
 	// providers that do not use an HTTP transport.
 	Upstream *UpstreamInfo
-	Raw      interface{}
+	// RawJSON holds the literal response body as sent by the provider for
+	// non-streaming calls. It preserves fields llmhub does not model and may
+	// contain provider metadata, so treat it as sensitive. It is nil when the
+	// provider does not expose a raw body. Raw remains the decoded value.
+	RawJSON []byte
+	// Raw is the provider-specific decoded response value. Its concrete type
+	// is internal to the provider; use RawJSON when exact bytes are needed.
+	Raw interface{}
 }
 
 // Text concatenates the textual segments of the response for the common use case where only text matters.
@@ -387,6 +394,12 @@ type StreamChunk struct {
 	// (OpenAI-compatible lanes and Anthropic). It is best-effort telemetry and
 	// may be empty for lanes that do not report a stable stream id.
 	ID string
+	// RawJSON holds the literal JSON payload of the frame that produced this
+	// chunk (the SSE `data` value, or the NDJSON line for Ollama). It is not
+	// the accumulated stream, and it is nil for terminal-only frames such as
+	// [DONE], message_stop, or a wrapper-synthesized Done chunk. The bytes may
+	// contain provider metadata, so treat them as sensitive.
+	RawJSON []byte
 	// Delta is the incremental text produced since the previous chunk.
 	Delta string
 	// ReasoningDelta is the incremental reasoning text produced since the previous chunk.

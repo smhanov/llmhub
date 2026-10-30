@@ -95,8 +95,12 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 	}
 	upstream := newUpstreamInfo(resp)
 
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 	var decoded anthropicResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return nil, err
 	}
 	parts, err := convertResponseContent(decoded.Content)
@@ -116,6 +120,7 @@ func (c *Client) Generate(ctx context.Context, prompt []*llmhub.Message, opts ..
 		Content:  parts,
 		Usage:    *usageFromBlock(decoded.Usage, cost),
 		Upstream: upstream,
+		RawJSON:  raw,
 		Raw:      decoded,
 	}, nil
 }
@@ -206,7 +211,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				case <-ctx.Done():
 					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- withUpstream(llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning}):
+				case ch <- withUpstream(llmhub.StreamChunk{Delta: text, ReasoningDelta: reasoning, RawJSON: []byte(event.Data)}):
 				}
 			case "content_block_stop":
 				var stop anthropicContentBlockStopEvent
@@ -227,7 +232,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				case <-ctx.Done():
 					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- withUpstream(llmhub.StreamChunk{ToolCalls: []*llmhub.ToolCallContent{toolCall}}):
+				case ch <- withUpstream(llmhub.StreamChunk{ToolCalls: []*llmhub.ToolCallContent{toolCall}, RawJSON: []byte(event.Data)}):
 				}
 			case "message_start":
 				var start anthropicMessageStartEvent
@@ -240,7 +245,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				}
 				usage := usageFromBlock(start.Message.Usage, 0)
 				if start.Message.ID != "" {
-					ch <- withUpstream(llmhub.StreamChunk{ID: start.Message.ID})
+					ch <- withUpstream(llmhub.StreamChunk{ID: start.Message.ID, RawJSON: []byte(event.Data)})
 				}
 				if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.CacheReadTokens == 0 && usage.CacheCreationTokens == 0 {
 					continue
@@ -249,7 +254,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				case <-ctx.Done():
 					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- withUpstream(llmhub.StreamChunk{Usage: usage}):
+				case ch <- withUpstream(llmhub.StreamChunk{Usage: usage, RawJSON: []byte(event.Data)}):
 				}
 			case "message_delta":
 				var delta anthropicMessageDeltaEvent
@@ -265,7 +270,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 				case <-ctx.Done():
 					ch <- withUpstream(llmhub.StreamChunk{Err: ctx.Err(), Done: true})
 					return
-				case ch <- withUpstream(llmhub.StreamChunk{Usage: usage, FinishReason: mapStopReason(delta.Delta.StopReason)}):
+				case ch <- withUpstream(llmhub.StreamChunk{Usage: usage, FinishReason: mapStopReason(delta.Delta.StopReason), RawJSON: []byte(event.Data)}):
 				}
 			case "message_stop":
 				for index, toolCall := range streamToolCalls {
@@ -279,7 +284,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 			case "error":
 				var payload anthropicErrorEvent
 				if err := json.Unmarshal([]byte(event.Data), &payload); err != nil {
-					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true})
+					ch <- withUpstream(llmhub.StreamChunk{Err: err, Done: true, RawJSON: []byte(event.Data)})
 				} else {
 					ch <- withUpstream(llmhub.StreamChunk{Err: &llmhub.StreamError{
 						Provider: providerName,
@@ -287,7 +292,7 @@ func (c *Client) Stream(ctx context.Context, prompt []*llmhub.Message, opts ...l
 						Type:     payload.Error.Type,
 						Code:     payload.Error.Code,
 						Param:    payload.Error.Param,
-					}, Done: true})
+					}, Done: true, RawJSON: []byte(event.Data)})
 				}
 				return
 			default:

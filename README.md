@@ -97,6 +97,32 @@ Content received before the error is still valid partial output. A stream
 that simply ends without an error frame is treated as a normal completion,
 even when the upstream omits the `[DONE]` sentinel.
 
+### Raw response bytes
+
+`Response.Raw` remains the provider-specific decoded value. When you need the
+provider's exact bytes — including vendor fields llmhub does not model — use
+`RawJSON`:
+
+- `Response.RawJSON` is the literal body of a non-streaming response.
+- `StreamChunk.RawJSON` is the literal JSON payload of the frame that produced
+  that chunk (the SSE `data` value, or the NDJSON line for Ollama). It is not
+  the accumulated stream; terminal `[DONE]`/`message_stop` frames and synthetic
+  Done chunks have nil `RawJSON`.
+
+```go
+resp, _ := client.Generate(ctx, prompt)
+log.Printf("raw upstream body: %s", resp.RawJSON)
+
+for chunk := range stream {
+    if len(chunk.RawJSON) > 0 {
+        log.Printf("frame: %s", chunk.RawJSON)
+    }
+}
+```
+
+Raw bodies can be large and may contain provider metadata or echoed content;
+treat them as sensitive and apply your own size/retention policy.
+
 ## Vision & Multi-modal Inputs
 
 ```go

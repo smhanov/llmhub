@@ -1851,6 +1851,124 @@ func TestClientGenerate_ReasoningDetailsMalformed(t *testing.T) {
 	}
 }
 
+func TestClientGenerate_RawJSON(t *testing.T) {
+	const body = `{"id":"raw-1","vendor_only":{"keep":true},"choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, body)
+	}))
+	defer server.Close()
+
+	resp, err := newStreamTestClient(server, "test-provider").Generate(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if got := string(resp.RawJSON); got != body {
+		t.Fatalf("RawJSON = %q, want exact body %q", got, body)
+	}
+	if !strings.Contains(string(resp.RawJSON), `"vendor_only"`) {
+		t.Fatalf("RawJSON dropped an unknown field: %s", resp.RawJSON)
+	}
+	if resp.Raw == nil {
+		t.Fatal("Raw decoded value is nil")
+	}
+	if resp.Text() != "hello" {
+		t.Fatalf("Text = %q, want hello", resp.Text())
+	}
+}
+
+func TestClientStream_RawJSON(t *testing.T) {
+	frames := []string{
+		`{"id":"s1","choices":[{"delta":{"content":"a"}}]}`,
+		`{"id":"s1","choices":[{"delta":{"content":"b"},"finish_reason":"stop"}]}`,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		for _, frame := range frames {
+			fmt.Fprintf(w, "data: %s\n\n", frame)
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	chunksCh, err := newStreamTestClient(server, "test-provider").Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	for i, frame := range frames {
+		if got := string(chunks[i].RawJSON); got != frame {
+			t.Fatalf("chunk %d RawJSON = %q, want %q", i, got, frame)
+		}
+	}
+	if chunks[2].RawJSON != nil {
+		t.Fatalf("Done chunk RawJSON = %q, want nil", chunks[2].RawJSON)
+	}
+}
+
+func TestClientStream_RawJSONUsageFrame(t *testing.T) {
+	const frame = `{"id":"s1","choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprintf(w, "data: %s\n\n", frame)
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	chunksCh, err := newStreamTestClient(server, "test-provider").Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 2 || chunks[0].Usage == nil {
+		t.Fatalf("expected usage chunk plus Done, got %+v", chunks)
+	}
+	if got := string(chunks[0].RawJSON); got != frame {
+		t.Fatalf("usage RawJSON = %q, want %q", got, frame)
+	}
+	if chunks[1].RawJSON != nil {
+		t.Fatalf("Done chunk RawJSON = %q, want nil", chunks[1].RawJSON)
+	}
+}
+
+func TestClientStream_RawJSONOnError(t *testing.T) {
+	const frame = `{"error":{"message":"boom","type":"server_error"}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: %s\n\n", frame)
+	}))
+	defer server.Close()
+
+	chunksCh, err := newStreamTestClient(server, "test-provider").Stream(context.Background(), []*llmhub.Message{
+		llmhub.NewUserMessage(llmhub.Text("hi")),
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+	chunks := collectStream(t, chunksCh)
+	if len(chunks) != 1 || chunks[0].Err == nil {
+		t.Fatalf("expected one terminal error chunk, got %+v", chunks)
+	}
+	if got := string(chunks[0].RawJSON); got != frame {
+		t.Fatalf("error RawJSON = %q, want %q", got, frame)
+	}
+}
+
 func TestClientGenerate_UpstreamInfo(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("x-upstream-served-by", "router-node-7")
